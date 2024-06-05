@@ -15,6 +15,7 @@ struct ComputationalParams{TF<:Float64, TI<:Int64}
     gridx::Vector{TF} # [a_min, a_max] bounds for the savings grid
     n_a::TI # number of grid points for the savings grid
     n_e::TI # number of grid points for the shock grid
+    n_v::TI # number of variables in the model
     T::TI # number of periods for the transition path
 end
 

@@ -1,17 +1,7 @@
 # Implementing Boehl (2024) ``HANK on Speed" methodology
-using DataFrames, UnPack
+using DataFrames, UnPack, LinearAlgebra
 import ForwardDiff: derivative
 import Zygote: pullback
-
-
-struct HankModel
-    params::Parameters
-    varnames::Vector{Symbol}
-    policygrid::Vector{Float64}
-    shockmat::Matrix{Float64}
-    Π::Matrix{Float64}
-    policymat::Matrix{Float64}
-end
 
 
 function VarSequences(df::DataFrame) # dataframe consisting of T-1 rows and n_v columns
@@ -35,11 +25,12 @@ function VJP(func::Function,
     primal::Vector{Float64}, 
     cotangent::Vector{Float64})
 
-    _, func_back = pull_back(func, primal)
+    _, func_back = pullback(func, primal)
     vjp_result, = func_back(cotangent)
 
     return vjp_result
 end
+
 
 
 function RayleighQuotient(J̅_inv::Matrix{Float64},
@@ -77,7 +68,7 @@ end
 
 function NewtonRaphson(x_0::Vector{Float64}, # initial guess for x
     J̅_inv::Matrix{Float64}; # inverse of the steady-state Jacobian
-    ε = 1e-9)
+    ε = 1e-9) # tolerance level
 
     x = x_new = x_0
     y = zeros(length(x))
