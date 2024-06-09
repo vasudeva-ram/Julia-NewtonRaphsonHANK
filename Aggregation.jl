@@ -1,27 +1,57 @@
-# General Structures
 
-struct ModelParams{TF<:Float64}
-    β::TF # discount factor
-    γ::TF # coefficient of relative risk aversion
-    σ::TF # standard deviation of the shock process
-    ρ::TF # persistence of the shock process
-    δ::TF # depreciation rate
-    α::TF # share of capital in production
+
+"""
+    ResidualsSteadyState(x::Vector{Float64},
+    a::Matrix{Float64},
+    D::Vector{Float64},
+    model::SequenceModel)
+
+Returns the residuals in the steady state, given variables
+values, savings policies and a distribution.
+"""
+function ResidualsSteadyState(varN, # endogenous variable values
+    varX, # exogenous variable values
+    a, # matrix of savings policies
+    D, # steady state distribution
+    model::SequenceModel)
+    
+    namedNvars = NamedTuple{model.varNs}(varN)
+    namedXvars = NamedTuple{model.varXs}(varX)
+    @unpack Y, KS, r, w = namedNvars
+    @unpack Z = namedXvars
+    
+    # Initialize vectors
+    residuals = zeros(length(varN))
+    
+    # Calculate aggregated variables
+    a = vcat(a...)
+    KD = a' * D
+    
+    # Unpack parameters
+    @unpack α, δ = model.ModParams
+    
+    # Calculate residuals
+    residuals = [
+        Y .- (Z .* (KS.^α)),
+        r .+ δ .- (α .* Z .* (KS.^(α-1))),
+        w .- ((1-α) .* Z .* (KS.^α)),
+        KS .- KD
+        ]
+    
+    return residuals
 end
 
 
-struct ComputationalParams{TF<:Float64, TI<:Int64}
-    dx::TF # size of infinitesimal shock for numerical differentiation
-    gridx::Vector{TF} # [a_min, a_max] bounds for the savings grid
-    n_a::TI # number of grid points for the savings grid
-    n_e::TI # number of grid points for the shock grid
-    n_v::TI # number of variables in the model
-    T::TI # number of periods for the transition path
-end
 
+"""
+    Residuals(x::Vector{Float64}, 
+    model::SequenceModel)
 
-function EquilibriumResiduals(sv::NamedTuple, 
-    model::AiyagariModel)
+Returns the residuals in the dynamics, given variable
+values for the entire sequence of T periods.
+"""
+function Residuals(x::Vector{Float64}, 
+    model::SequenceModel)
 
     # Unpack parameters
     @unpack δ, α = model.params
@@ -32,7 +62,7 @@ function EquilibriumResiduals(sv::NamedTuple,
     KS_lag[2:end] = KS[1:end-1]
 
     # obtain aggregate capital demand
-    KD = get_KDemand(sv, model)
+    KD = get_KDemand(x, model)
 
     residuals = [
         Y .- KS_lag.^α,
@@ -43,6 +73,4 @@ function EquilibriumResiduals(sv::NamedTuple,
     
     return residuals
 end
-
-
 

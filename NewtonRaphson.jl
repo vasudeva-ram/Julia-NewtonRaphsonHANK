@@ -1,7 +1,4 @@
 # Implementing Boehl (2024) ``HANK on Speed" methodology
-using DataFrames, UnPack, LinearAlgebra
-import ForwardDiff: derivative
-import Zygote: pullback
 
 
 function VarSequences(df::DataFrame) # dataframe consisting of T-1 rows and n_v columns
@@ -81,5 +78,25 @@ function NewtonRaphson(x_0::Vector{Float64}, # initial guess for x
     end
 
     return x_new
+end
+
+# Testing functions
+
+function test_Vec2Mat_JVP(x::Vector{<:Real})
+    return [x * x', x * x' + Matrix(1.0I, length(x), length(x))] 
+end
+
+function test_Vec2Vec_JVP(x::Vector{<:Real})
+    return append!(vec(x * x'), vec(x * x' + Matrix(1.0I, length(x), length(x))))
+end
+
+
+function vectorize_matrices(matrices::Vector{Matrix{Float64}})
+    n, m = size(matrices[1])
+    result = zeros(n * m, length(matrices))
+    for i in 1:length(matrices)
+        result[:, i] = vec(matrices[i])
+    end
+    return [result...]
 end
 

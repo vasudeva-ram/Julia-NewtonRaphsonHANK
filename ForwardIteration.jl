@@ -8,13 +8,13 @@ Performs one full iteration of the Forward Iteration algorithm. The algorithm
 starts from the steady state at time period 1 and iterates forward to time
 period T, calculating the transition matrices and returning the sequence of distributions.
 """
-function ForwardIteration(y_seq::Vector{Matrix{Float64}},
+function ForwardIteration(y_seq, # sequence of savings policy functions
     model::SequenceModel,
     ss::SteadyState) # has to be the starting (period 1) steady state distribution
     
     # setting up the Distributions vector
     T = length(y_seq)
-    D_seq = Array{Vector{Float64}}(undef, T)
+    D_seq = zeros(T)
     D_seq[1] = ss.D
 
     # Perform forward iteration
@@ -35,9 +35,9 @@ end
 Calculates the transition matrix implied by the exogenous shock process and 
 the savings policy function following Young (2010).
 """
-function DistributionTransition(savingspf::Matrix{Float64}, # savings policy function
-    policygrid::Vector{Float64}, # savings grid
-    Π::Matrix{Float64}) # transition matrix for the exogenous shock process (get from `normalized_shockprocess()` function)
+function DistributionTransition(savingspf, # savings policy function
+    policygrid, # savings grid
+    Π) # transition matrix for the exogenous shock process (get from `normalized_shockprocess()` function)
     
     n_a, n_e = size(savingspf)
     n_m = n_a * n_e
@@ -69,3 +69,24 @@ function DistributionTransition(savingspf::Matrix{Float64}, # savings policy fun
     return Λ
 end
 
+
+"""
+    invariant_dist(Π::AbstractMatrix;
+    method::Int64 = 1,
+    ε::Float64 = 1e-9,
+    itermax::Int64 = 50000,
+    initVector::Union{Nothing, Vector{Float64}}=nothing,
+    verbose::Bool = false
+    )
+
+Calculates the invariant distribution of a Markov chain with transition matrix Π.
+"""
+function invariant_dist(Π::AbstractMatrix)
+
+    ΠT = Π' # transpose
+
+    # https://discourse.julialang.org/t/stationary-distribution-with-sparse-transition-matrix/40301/8
+    D = [1; (I - ΠT[2:end, 2:end]) \ Vector(ΠT[2:end,1])]
+
+    return D ./ sum(D) # return normalized to sum to 1.0
+end
