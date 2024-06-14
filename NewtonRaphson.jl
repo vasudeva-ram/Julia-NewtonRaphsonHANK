@@ -9,35 +9,6 @@ end
 
 
 
-function JVP(func::Function, 
-    primal::Vector{Float64}, 
-    tangent::Vector{Float64})
-
-    g(t) = func(primal + t*tangent)
-    return derivative(g, 0.0)
-end
-
-
-function VJP(func::Function, 
-    primal::Vector{Float64}, 
-    cotangent::Vector{Float64})
-
-    _, func_back = pullback(func, primal)
-    vjp_result, = func_back(cotangent)
-
-    return vjp_result
-end
-
-
-
-function RayleighQuotient(J̅_inv::Matrix{Float64},
-    Λxy::Vector{Float64},
-    y::Vector{Float64})
-
-    return (y' * J̅_inv * Λxy) / (y' * y)
-end
-
-
 function y_Iteration(J̅_inv::Matrix{Float64},
     x::Vector{Float64}, # evaluation point (primal)
     y_init::Vector{Float64}; # initial guess for y (tangent)
@@ -90,13 +61,4 @@ function test_Vec2Vec_JVP(x::Vector{<:Real})
     return append!(vec(x * x'), vec(x * x' + Matrix(1.0I, length(x), length(x))))
 end
 
-
-function vectorize_matrices(matrices::Vector{Matrix{Float64}})
-    n, m = size(matrices[1])
-    result = zeros(n * m, length(matrices))
-    for i in 1:length(matrices)
-        result[:, i] = vec(matrices[i])
-    end
-    return [result...]
-end
 

@@ -1,8 +1,7 @@
 # Imports and Uses
-using LinearAlgebra, SparseArrays, DataFrames, UnPack, NLsolve, BenchmarkTools, Interpolations
-import ForwardDiff: jacobian 
-import ForwardDiff: Dual
-import Zygote: gradient
+using LinearAlgebra, SparseArrays, DataFrames, UnPack, NLsolve, BenchmarkTools, Interpolations, Zygote
+# import ForwardDiff: jacobian 
+# import ForwardDiff: Dual
 
 #NOTE: The following steady-state struct is specific to the Krussell-Smith model only.
 struct SteadyState
@@ -36,10 +35,10 @@ struct SequenceModel
     varXs::Tuple{Vararg{Symbol}} # tuple of *aggregate* exogenous variable names only
     CompParams::ComputationalParams # parameters determining computational structure of model
     ModParams::ModelParams # parameters determining agents' economic behavior of model
-    policygrid # grid of possible savings positions #TODO: eliminate either policygrid or policymat
-    shockmat # n_a x n_e matrix of shock values
-    policymat # n_a x n_e matrix of savings values
-    Π # transition matrix for the shock process
+    policygrid::Vector{Float64} # grid of possible savings positions #TODO: eliminate either policygrid or policymat
+    shockmat::Matrix{Float64} # n_a x n_e matrix of shock values
+    policymat::Matrix{Float64} # n_a x n_e matrix of savings values
+    Π::Matrix{Float64} # transition matrix for the exogenous shock process
 end
 
 # General functions
@@ -112,4 +111,40 @@ function get_RouwenhorstDiscretization(n::Int64, # dimension of state-space
 
 end
 
+function vectorize_matrices(matrices::Vector{Matrix{Float64}})
+    n, m = size(matrices[1])
+    result = zeros(n * m, length(matrices))
+    for i in 1:length(matrices)
+        result[:, i] = vec(matrices[i])
+    end
+    return [result...]
+end
 
+
+function JVP(func::Function, 
+    primal::Vector{Float64}, 
+    tangent::AbstractArray)
+
+    g(t) = func(primal + t*tangent)
+    
+    return Zygote.forwarddiff(g, 0.0)
+end
+
+
+function VJP(func::Function, 
+    primal::Vector{Float64}, 
+    cotangent::Vector{Float64})
+
+    _, func_back = pullback(func, primal)
+    vjp_result, = func_back(cotangent)
+
+    return vjp_result
+end
+
+
+function RayleighQuotient(J̅_inv::Matrix{Float64},
+    Λxy::Vector{Float64},
+    y::Vector{Float64})
+
+    return (y' * J̅_inv * Λxy) / (y' * y)
+end

@@ -8,7 +8,7 @@ Performs one full iteration of the Forward Iteration algorithm. The algorithm
 starts from the steady state at time period 1 and iterates forward to time
 period T, calculating the transition matrices and returning the sequence of distributions.
 """
-function ForwardIteration(y_seq, # sequence of savings policy functions
+function ForwardIteration(y_seq::Vector{Matrix{Float64}}, # sequence of savings policy functions
     model::SequenceModel,
     ss::SteadyState) # has to be the starting (period 1) steady state distribution
     
@@ -35,9 +35,9 @@ end
 Calculates the transition matrix implied by the exogenous shock process and 
 the savings policy function following Young (2010).
 """
-function DistributionTransition(savingspf, # savings policy function
-    policygrid, # savings grid
-    Π) # transition matrix for the exogenous shock process (get from `normalized_shockprocess()` function)
+function DistributionTransition(savingspf::Matrix{Float64}, # savings policy function
+    policygrid::Vector{Float64}, # savings grid
+    Π::AbstractMatrix) # transition matrix for the exogenous shock process (get from `normalized_shockprocess()` function)
     
     n_a, n_e = size(savingspf)
     n_m = n_a * n_e

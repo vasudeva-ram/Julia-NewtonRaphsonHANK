@@ -10,20 +10,21 @@ period 1. The function returns the sequence of sparse transition matrices
 which will be used in determining the evolution of the distribution in the Forward
 Iteration algorithm.
 """
-function BackwardIteration(sv::DataFrame,
+function BackwardIteration(xj::AbstractVector,
     model::SequenceModel,
     end_ss::SteadyState) # has to be the ending steady state (i.e., at time period T)
 
-    # Unpack parameters
+    # Reorganize main vector
     T = model.CompParams.T
+    xmat = transpose(reshape(xj, (model.CompParams.n_v, T-1))) # make it (T-1) x n_v matrix
     
     # Initialize savings vector
-    y_seq = fill(Matrix{Any}(undef, size(end_ss.policies.saving)), T)
-    y_seq[T] = end_ss.policies.saving
+    y_seq = fill(Matrix{Float64}(undef, size(end_ss.ssPolicies)), T)
+    y_seq[T] = end_ss.ssPolicies
 
     # Perform backward Iteration
     for i in 1:T-1
-        y_seq[T-i] = BackwardStep(sv[T-i], y_seq[T+1-i], model)
+        y_seq[T-i] = BackwardStep(xmat[T-i,:], y_seq[T+1-i], model)
     end
     
     return y_seq
@@ -40,8 +41,8 @@ Note that this step needs to be model specific. This is just the implementation
 for the Krussell-Smith model. 
 The function takes the current savings policy function and calculates the
 """
-function BackwardStep(varN, #TODO: annotate to support dual numbers and float64 vectors
-    currentpolicy, # current policy function guess 
+function BackwardStep(varN::AbstractVector, #TODO: annotate to support dual numbers and float64 vectors
+    currentpolicy::Matrix{Float64}, # current policy function guess 
     model::SequenceModel)
 
     # Unpack objects
@@ -58,9 +59,9 @@ function BackwardStep(varN, #TODO: annotate to support dual numbers and float64 
 
     # Interpolate the policy function to the grid
     impliedstate = (1 / (1 + r)) * (cmat - (w .* shockmat) + policymat)
-    griddedpolicy = zeros(size(impliedstate))
+    griddedpolicy = Matrix{Float64}(undef, size(policymat))
 
-    for i in axes(impliedstate, 2)
+    for i in 1:model.CompParams.n_e
         linpolate = extrapolate(interpolate((impliedstate[:,i],), policymat[:,i], Gridded(Linear())), Flat())
         griddedpolicy[:,i] = linpolate.(policymat[:,i])
     end
@@ -77,7 +78,7 @@ Applies the Endogenous Gridpoint method to find the steady state policies of
 the households.
 In essence, performs iteration on `BackwardStep()` until convergence is reached.
 """
-function BackwardSteadyState(varNs, #TODO: annotate to support dual numbers and float64 vectors
+function BackwardSteadyState(varNs::Vector{Float64}, #TODO: annotate to support dual numbers and float64 vectors
     model::SequenceModel) # has to be the ending steady state (i.e., at time period T)
 
     # Unpack parameters
@@ -93,4 +94,25 @@ function BackwardSteadyState(varNs, #TODO: annotate to support dual numbers and 
     end
 
     return newguess
+end
+
+
+# Testing function
+
+function FD_LI()
+    x = rand(10)
+    sort!(x)
+    y = x .+ 1.0
+    
+    function inter(a)
+        res = zeros(size(a))        
+        linpolate = extrapolate(interpolate((x,), y, Gridded(Linear())), Flat())
+        res = linpolate.(a)
+        return res
+    end
+        
+    z = x .+ 0.3
+    J = jacobian(inter, z)
+
+    return J
 end

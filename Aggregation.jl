@@ -9,10 +9,10 @@
 Returns the residuals in the steady state, given variables
 values, savings policies and a distribution.
 """
-function ResidualsSteadyState(varN, # endogenous variable values
-    varX, # exogenous variable values
-    a, # matrix of savings policies
-    D, # steady state distribution
+function ResidualsSteadyState(varN::Vector{Float64}, # endogenous variable values
+    varX::Vector{Float64}, # exogenous variable values
+    a::Matrix{Float64}, # matrix of savings policies
+    D::Vector{Float64}, # steady state distribution
     model::SequenceModel)
     
     namedNvars = NamedTuple{model.varNs}(varN)
