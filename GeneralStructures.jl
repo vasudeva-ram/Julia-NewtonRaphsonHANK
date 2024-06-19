@@ -31,8 +31,7 @@ struct ComputationalParams{TF<:Float64, TI<:Int64}
 end
 
 struct SequenceModel
-    varNs::Tuple{Vararg{Symbol}} # tuple of *aggregate* endogenous variable names only
-    varXs::Tuple{Vararg{Symbol}} # tuple of *aggregate* exogenous variable names only
+    varXs::Tuple{Vararg{Symbol}} # tuple of all *aggregate* variable names only (exog. + endog.)
     CompParams::ComputationalParams # parameters determining computational structure of model
     ModParams::ModelParams # parameters determining agents' economic behavior of model
     policygrid::Vector{Float64} # grid of possible savings positions #TODO: eliminate either policygrid or policymat
@@ -111,6 +110,13 @@ function get_RouwenhorstDiscretization(n::Int64, # dimension of state-space
 
 end
 
+
+"""
+    vectorize_matrices(matrices::Vector{Matrix{Float64}})
+
+Converts a vector of matrices, `VM = [M1, M2, M3 ...]` into a single vector
+`V = [vec(M1), vec(M2), vec(M3) ...]`.
+"""
 function vectorize_matrices(matrices::Vector{Matrix{Float64}})
     n, m = size(matrices[1])
     result = zeros(n * m, length(matrices))
@@ -121,6 +127,16 @@ function vectorize_matrices(matrices::Vector{Matrix{Float64}})
 end
 
 
+"""
+    JVP(func::Function, 
+    primal::Vector{Float64}, 
+    tangent::AbstractArray)
+
+Returns the Jacobian-Vector Product (JVP) of a function.
+Given a function `func`, a primal point `primal`, and a tangent vector `tangent`,
+the JVP is given by `Jᵀ * tangent`, where `J` is the Jacobian of `func` evaluated 
+at the point `primal`.
+"""
 function JVP(func::Function, 
     primal::Vector{Float64}, 
     tangent::AbstractArray)
@@ -131,9 +147,19 @@ function JVP(func::Function,
 end
 
 
+"""
+    VJP(func::Function, 
+    primal::Vector{Float64}, 
+    cotangent::AbstractArray)
+
+Returns the Vector-Jacobian Product (VJP) of a function.
+Given a function `func`, a primal point `primal`, and a cotangent vector `cotangent`,
+the VJP is given by `cotangent * J`, where `J` is the Jacobian of `func` evaluated
+at the point `primal`.
+"""
 function VJP(func::Function, 
     primal::Vector{Float64}, 
-    cotangent::Vector{Float64})
+    cotangent::AbstractArray)
 
     _, func_back = pullback(func, primal)
     vjp_result, = func_back(cotangent)
@@ -142,6 +168,16 @@ function VJP(func::Function,
 end
 
 
+"""
+    RayleighQuotient(J̅_inv::Matrix{Float64},
+    Λxy::Vector{Float64},
+    y::Vector{Float64})
+
+Calculates the Rayleigh Quotient of a matrix `J̅_inv` and vectors `Λxy` and `y`.
+In our implementation, `J̅_inv` is the inverse of the Jacobian matrix evaluated 
+at the steady state, `Λxy` is the Jacobian-Vector Product (JVP) of the `Residuals` 
+function evaluated against the next guess, `y`, as the tangent vector.
+"""
 function RayleighQuotient(J̅_inv::Matrix{Float64},
     Λxy::Vector{Float64},
     y::Vector{Float64})

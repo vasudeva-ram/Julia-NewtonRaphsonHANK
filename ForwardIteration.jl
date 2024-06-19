@@ -1,6 +1,6 @@
 
 """
-    ForwardIteration(y_seq::Vector{Matrix{Float64}},
+    ForwardIteration(a_seq::Vector{Float64},
     model::SequenceModel,
     ss::SteadyState)
 
@@ -8,22 +8,34 @@ Performs one full iteration of the Forward Iteration algorithm. The algorithm
 starts from the steady state at time period 1 and iterates forward to time
 period T, calculating the transition matrices and returning the sequence of distributions.
 """
-function ForwardIteration(y_seq::Vector{Matrix{Float64}}, # sequence of savings policy functions
+function ForwardIteration(a_seqvec::Vector{Float64}, # vectorized sequence of T-savings policy functions
     model::SequenceModel,
     ss::SteadyState) # has to be the starting (period 1) steady state distribution
     
     # setting up the Distributions vector
-    T = length(y_seq)
-    D_seq = zeros(T)
-    D_seq[1] = ss.D
+    T = model.CompParams.T
+    asize = size(ss.ssPolicies)
+    a_seq = reshape(a_seqvec, (:, T))
+    
+    # Initialize buffers
+    KD = Zygote.Buffer(zeros(Float64, T))
+    
+    # initial iteration
+    a = a_seq[:, 1]
+    D = ss.ssD
+    KD[1] = a' * D
 
     # Perform forward iteration
     for i in 2:T
-        Λ = DistributionTransition(y_seq[i-1], model.policygrid, model.Π)
-        D_seq[i] = Λ * D_seq[i-1] #TODO: check if tranposing is correct
+        Λ = DistributionTransition(reshape(a_seq[:, i-1], asize), model.policygrid, model.Π)
+        D = Λ * D
+        a = a_seq[:, i]
+        KD[i] = a' * D #TODO: check if tranposing is correct
     end
     
-    return D_seq
+    capDemand = copy(KD)
+
+    return capDemand[1:end-1]
 end
 
 
