@@ -8,34 +8,27 @@ Performs one full iteration of the Forward Iteration algorithm. The algorithm
 starts from the steady state at time period 1 and iterates forward to time
 period T, calculating the transition matrices and returning the sequence of distributions.
 """
-function ForwardIteration(a_seqvec::Vector{Float64}, # vectorized sequence of T-savings policy functions
+function ForwardIteration(a_seq::Vector{Matrix{TF}}, # sequence of T-savings policy functions
     model::SequenceModel,
-    ss::SteadyState) # has to be the starting (period 1) steady state distribution
+    ss::SteadyState) where TF # has to be the starting (period 1) steady state distribution
     
     # setting up the Distributions vector
     T = model.CompParams.T
-    asize = size(ss.ssPolicies)
-    a_seq = reshape(a_seqvec, (:, T))
-    
-    # Initialize buffers
-    KD = Zygote.Buffer(zeros(Float64, T))
+    KD = Vector{TF}(undef, T)
     
     # initial iteration
-    a = a_seq[:, 1]
     D = ss.ssD
-    KD[1] = a' * D
+    KD[1] = dot(vec(a_seq[1]), D)
 
     # Perform forward iteration
     for i in 2:T
-        Λ = DistributionTransition(reshape(a_seq[:, i-1], asize), model.policygrid, model.Π)
+        Λ = DistributionTransition(a_seq[i-1], model.policygrid, model.Π)
         D = Λ * D
-        a = a_seq[:, i]
-        KD[i] = a' * D #TODO: check if tranposing is correct
+        a = vec(a_seq[i])
+        KD[i] = dot(a, D)
     end
-    
-    capDemand = copy(KD)
 
-    return capDemand[1:end-1]
+    return KD[1:end-1]
 end
 
 
@@ -47,9 +40,9 @@ end
 Calculates the transition matrix implied by the exogenous shock process and 
 the savings policy function following Young (2010).
 """
-function DistributionTransition(savingspf::Matrix{Float64}, # savings policy function
+function DistributionTransition(savingspf::Matrix{TF}, # savings policy function
     policygrid::Vector{Float64}, # savings grid
-    Π::AbstractMatrix) # transition matrix for the exogenous shock process (get from `normalized_shockprocess()` function)
+    Π::AbstractMatrix) where TF # transition matrix for the exogenous shock process (get from `normalized_shockprocess()` function)
     
     n_a, n_e = size(savingspf)
     n_m = n_a * n_e
@@ -57,7 +50,7 @@ function DistributionTransition(savingspf::Matrix{Float64}, # savings policy fun
     Jbases = [(ne -1)*n_a for ne in 1:n_e]
     Is = Int64[]
     Js = Int64[]
-    Vs = Float64[]
+    Vs = TF[]
 
     for col in eachindex(policy)
         m = findfirst(x->x>=policy[col], policygrid)
@@ -80,6 +73,45 @@ function DistributionTransition(savingspf::Matrix{Float64}, # savings policy fun
 
     return Λ
 end
+
+
+# function DistributionTransition(savingspf::AbstractMatrix, # savings policy function
+#     policygrid::AbstractVector, # savings grid
+#     Π::AbstractMatrix) # transition matrix for the exogenous shock process (get from `normalized_shockprocess()` function)
+    
+#     n_a, n_e = size(savingspf)
+#     n_m = n_a * n_e
+#     policy = vcat(savingspf...)
+#     Jbases = [(ne -1)*n_a for ne in 1:n_e]
+#     Is = Int64[]
+#     Js = Int64[]
+#     Vs = Float64[]
+
+#     for col in eachindex(policy)
+#         tempIs = Int64[]
+#         tempJs = Int64[]
+#         tempVs = Float64[]
+#         m = findfirst(x->x>=policy[col], policygrid)
+#         j = div(col - 1, n_a) + 1
+#         if m == 1
+#             tempIs = m .+ Jbases
+#             tempJs = fill(col, n_e)
+#             tempVs = 1.0 .* Π[j,:]
+#         else
+#             tempIs = vcat((m-1) .+ Jbases, m .+ Jbases)
+#             tempJs = fill(col, 2*n_e)
+#             w = (policy[col] - policygrid[m-1]) / (policygrid[m] - policygrid[m-1])
+#             tempVs = vcat((1.0 - w) .* Π[j,:], w .* Π[j,:])
+#         end
+#         Is = vcat(Is, tempIs)
+#         Js = vcat(Js, tempJs)
+#         Vs = vcat(Vs, tempVs)
+#     end
+
+#     Λ = sparse(Is, Js, Vs, n_m, n_m)
+
+#     return Λ
+# end
 
 
 """

@@ -1,7 +1,6 @@
 # Imports and Uses
-using LinearAlgebra, SparseArrays, DataFrames, UnPack, NLsolve, BenchmarkTools, Interpolations, Zygote
-# import ForwardDiff: jacobian 
-# import ForwardDiff: Dual
+using LinearAlgebra, SparseArrays, DataFrames, UnPack, NLsolve, BenchmarkTools, Interpolations
+using Zygote, ForwardDiff
 
 #NOTE: The following steady-state struct is specific to the Krussell-Smith model only.
 struct SteadyState
@@ -117,13 +116,20 @@ end
 Converts a vector of matrices, `VM = [M1, M2, M3 ...]` into a single vector
 `V = [vec(M1), vec(M2), vec(M3) ...]`.
 """
-function vectorize_matrices(matrices::Vector{Matrix{Float64}})
+function vectorize_matrices(matrices::Vector{<:Matrix})
     n, m = size(matrices[1])
-    result = zeros(n * m, length(matrices))
+    result = similar(matrices[1], n*m, length(matrices))
     for i in 1:length(matrices)
         result[:, i] = vec(matrices[i])
     end
     return [result...]
+end
+
+
+function Vec2Mat(vec::Vector{Float64}, n::Int64, m::Int64)
+    T = Int(length(vec)/(n*m))
+    kmat = reshape(vec, (n, m, T))
+    return [kmat[:, :, i] for i in 1:T]
 end
 
 
@@ -142,8 +148,20 @@ function JVP(func::Function,
     tangent::AbstractArray)
 
     g(t) = func(primal + t*tangent)
+    res = ForwardDiff.derivative(g, 0.0)
     
-    return Zygote.forwarddiff(g, 0.0)
+    return res
+end
+
+# alternate
+function altJVP(func, primal, tangent)
+    g(t) = func(primal + t*tangent)
+    return ForwardDiff.derivative(g, 0.0)
+end
+
+
+function testfx(x)
+    return x[1]^2 + x[2]^2
 end
 
 

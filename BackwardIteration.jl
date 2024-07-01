@@ -10,16 +10,16 @@ period 1. The function returns the sequence of sparse transition matrices
 which will be used in determining the evolution of the distribution in the Forward
 Iteration algorithm.
 """
-function BackwardIteration(xVec::AbstractVector, # n_v x (T-1) vector of variable values
+function BackwardIteration(xVec::Union{Vector{TF}, SparseVector{TF, TI}}, # n_v x (T-1) vector of variable values
     model::SequenceModel,
-    end_ss::SteadyState) # has to be the ending steady state (i.e., at time period T)
-
+    end_ss::SteadyState) where {TF, TI} # has to be the ending steady state (i.e., at time period T)
+    
     # Reorganize main vector
     T = model.CompParams.T
     xMat = transpose(reshape(xVec, (model.CompParams.n_v, T-1))) # make it (T-1) x n_v matrix
     
     # Initialize savings vector
-    a_seq = fill(Matrix{Float64}(undef, size(end_ss.ssPolicies)), T)
+    a_seq = fill(Matrix{TF}(undef, size(end_ss.ssPolicies)), T)
     a_seq[T] = end_ss.ssPolicies
 
     # Perform backward Iteration
@@ -42,7 +42,7 @@ for the Krussell-Smith model.
 The function takes the current savings policy function and calculates the
 """
 function BackwardStep(xVals::AbstractVector, # (n_v x 1) vector of endogenous variable values
-    currentpolicy::Matrix{Float64}, # current policy function guess 
+    currentpolicy::AbstractMatrix, # current policy function guess 
     model::SequenceModel)
 
     # Unpack objects
@@ -59,7 +59,7 @@ function BackwardStep(xVals::AbstractVector, # (n_v x 1) vector of endogenous va
 
     # Interpolate the policy function to the grid
     impliedstate = (1 / (1 + r)) * (cmat - (w .* shockmat) + policymat)
-    griddedpolicy = Matrix{Float64}(undef, size(policymat))
+    griddedpolicy = Matrix{Any}(undef, size(policymat))
 
     for i in 1:model.CompParams.n_e
         linpolate = extrapolate(interpolate((impliedstate[:,i],), policymat[:,i], Gridded(Linear())), Flat())

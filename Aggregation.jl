@@ -9,9 +9,9 @@
 Returns the residuals in the steady state, given variables
 values, savings policies and a distribution.
 """
-function ResidualsSteadyState(xVals::Vector{Float64}, # vector of variable values
-    a::Matrix{Float64}, # matrix of savings policies
-    D::Vector{Float64}, # steady state distribution
+function ResidualsSteadyState(xVals::AbstractVector, # vector of variable values
+    a::AbstractMatrix, # matrix of savings policies
+    D::AbstractVector, # steady state distribution
     model::SequenceModel)
     
     namedXvars = NamedTuple{model.varXs}(xVals)
@@ -51,23 +51,21 @@ end
 Returns the residuals in the dynamics, given variable
 values for the entire sequence of T periods.
 """
-function Residuals(xVec::Vector{Float64}, # (n_v x T-1) vector of all endogenous variable values
-    KD::Vector{Float64},
-    model::SequenceModel)
+function Residuals(xVec::Union{Vector{TF}, SparseVector{TF, TI}}, # (n_v x T-1) vector of all endogenous variable values
+    KD::Vector{TF},
+    model::SequenceModel) where {TF, TI}
 
     # Unpack parameters
     @unpack δ, α = model.ModParams
     @unpack n_v, T = model.CompParams
 
-    xMat = transpose(reshape(xVec, (n_v, T-1))) # make it (T-1) x n_v matrix
+    xMat = transpose(reshape(xVec, (n_v, :))) # reshape to (T-1) x n_v matrix
     namedXvecs = NamedTuple{model.varXs}(Tuple([xMat[:,i] for i in 1:n_v]))
     @unpack Y, KS, r, w, Z = namedXvecs
     
     # generate lagged and exogenous variables
-    KS_l = Zygote.Buffer(KS, T-1, )
-    KS_l[1] = KS[1]
-    KS_l[2:T-1] = KS[1:end-1]
-    KS_lag = copy(KS_l)
+    KS_lag = copy(KS)
+    KS_lag[2:T-1] = KS[1:end-1]
     Zexog = repeat([1.0], T-1)
 
     # Initialize residuals
@@ -79,13 +77,7 @@ function Residuals(xVec::Vector{Float64}, # (n_v x T-1) vector of all endogenous
         Z .- Zexog # exogenous variable equality
         ]
         
-    # Reshape residuals
-    reshaped = Zygote.Buffer(zeros(Float64, n_v, T-1), n_v, T-1)
-    for i in 1:n_v
-        reshaped[i, :] = residuals[i]
-    end
-
-    return copy(vcat(reshaped...))
+    return [vcat(residuals'...)...]
 end
 
 
