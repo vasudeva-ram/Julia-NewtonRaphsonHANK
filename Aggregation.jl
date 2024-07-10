@@ -51,9 +51,9 @@ end
 Returns the residuals in the dynamics, given variable
 values for the entire sequence of T periods.
 """
-function Residuals(xVec::Union{Vector{TF}, SparseVector{TF, TI}}, # (n_v x T-1) vector of all endogenous variable values
-    KD::Vector{TF},
-    model::SequenceModel) where {TF, TI}
+function Residuals(xVec, # (n_v x T-1) vector of all endogenous variable values
+    KD, # sequence of capital demand values
+    model::SequenceModel)
 
     # Unpack parameters
     @unpack δ, α = model.ModParams
@@ -77,7 +77,9 @@ function Residuals(xVec::Union{Vector{TF}, SparseVector{TF, TI}}, # (n_v x T-1) 
         Z .- Zexog # exogenous variable equality
         ]
         
-    return [vcat(residuals'...)...]
+    transRes = [(i)' for i in residuals]
+
+    return vec(reduce(vcat, transRes))
 end
 
 

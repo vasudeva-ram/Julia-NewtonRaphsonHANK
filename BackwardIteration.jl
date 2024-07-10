@@ -10,9 +10,9 @@ period 1. The function returns the sequence of sparse transition matrices
 which will be used in determining the evolution of the distribution in the Forward
 Iteration algorithm.
 """
-function BackwardIteration(xVec::Union{Vector{TF}, SparseVector{TF, TI}}, # n_v x (T-1) vector of variable values
+function BackwardIteration(xVec::Union{Vector{TF}, SparseVector{TF, Int64}}, # n_v x (T-1) vector of variable values
     model::SequenceModel,
-    end_ss::SteadyState) where {TF, TI} # has to be the ending steady state (i.e., at time period T)
+    end_ss::SteadyState) where TF # has to be the ending steady state (i.e., at time period T)
     
     # Reorganize main vector
     T = model.CompParams.T
@@ -27,7 +27,7 @@ function BackwardIteration(xVec::Union{Vector{TF}, SparseVector{TF, TI}}, # n_v 
         a_seq[T-i] = BackwardStep(xMat[T-i,:], a_seq[T+1-i], model)
     end
     
-    return a_seq
+    return vcat([vec(a) for a in a_seq]...)
 end
 
 
@@ -41,9 +41,9 @@ Note that this step needs to be model specific. This is just the implementation
 for the Krussell-Smith model. 
 The function takes the current savings policy function and calculates the
 """
-function BackwardStep(xVals::AbstractVector, # (n_v x 1) vector of endogenous variable values
-    currentpolicy::AbstractMatrix, # current policy function guess 
-    model::SequenceModel)
+function BackwardStep(xVals::Union{Vector{TF}, SparseVector{TF, TI}}, # (n_v x 1) vector of endogenous variable values
+    currentpolicy::Matrix{TF}, # current policy function guess 
+    model::SequenceModel) where {TF, TI}
 
     # Unpack objects
     @unpack policygrid, shockmat, Π, policymat = model
@@ -59,7 +59,7 @@ function BackwardStep(xVals::AbstractVector, # (n_v x 1) vector of endogenous va
 
     # Interpolate the policy function to the grid
     impliedstate = (1 / (1 + r)) * (cmat - (w .* shockmat) + policymat)
-    griddedpolicy = Matrix{Any}(undef, size(policymat))
+    griddedpolicy = Matrix{TF}(undef, size(policymat))
 
     for i in 1:model.CompParams.n_e
         linpolate = extrapolate(interpolate((impliedstate[:,i],), policymat[:,i], Gridded(Linear())), Flat())

@@ -4,31 +4,65 @@ include("BackwardIteration.jl")
 include("Aggregation.jl")
 
 
+function getJacobians(ss::SteadyState, # should be the ending steady state (at time T)
+    model::SequenceModel)
+
+    # Unpack parameters
+    @unpack T, n_v = model.CompParams
+    n = (T-1) * n_v
+    
+    # Initialize vectors
+    xVec = repeat([values(ss.ssVars)...], T-1)
+    a_vec = repeat(vec(ss.ssPolicies), T-1)
+    idmat = sparse(1.0I, n, n)
+    JBI = Vector{Vector{eltype(ss_Vector)}}(undef, n_v)
+    JFI = Vector{Vector{eltype(ss_Vector)}}(undef, n_v)
+
+    # Define backward and forward functions
+    function backFunc(xVec::AbstractVector) # (n_v * T-1)-dimensional vector
+        a_seq = BackwardIteration(xVec, model, end_ss)
+        return a_seq
+    end
+
+    function forwardFunc(aseq)
+        KD = ForwardIteration(aseq, model, ss) #TODO: update this to ForwardIterationOld
+        zVals = Residuals(xVec, KD, model)
+        return zVals
+    end
+
+    # Obtain Jacobians using JVPs and VJPs
+    for i in 1:n_v
+        JBI[i] = JVP(backFunc, xVec, idmat[:, n - n_v + i])
+        JFI[i] = VJP(forwardFunc, a_vec, idmat[:, n - n_v + i]) # update to VJP_RD
+    end
+    
+    return JBI, JFI
+end
+
+
+
+
 function JacobianBI(end_ss::SteadyState, # ending steady state
     model::SequenceModel)
 
     # Unpack parameters
     @unpack T, n_v = model.CompParams
     n = (T-1) * n_v
-    start_ss = end_ss
     
     function backFunc(xVec::AbstractVector) # (n_v * T-1)-dimensional vector
         a_seq = BackwardIteration(xVec, model, end_ss)
-        KD = ForwardIteration(a_seq, model, start_ss)
-        zVals = Residuals(xVec, KD, model)
-        return zVals
+        return a_seq
     end
 
     # Initialize vectors
-    ss_Vector = repeat([values(end_ss.ssVars)...], T-1)
-    
+    ss_Vector = repeat(collect(values(end_ss.ssVars)), T-1)    
     idmat = sparse(1.0I, n, n)
-    JBI = Vector{AbstractVector}(undef, n_v)
+    JBI = Vector{Vector{eltype(ss_Vector)}}(undef, n_v)
 
     for i in 1:n_v
         JBI[i] = JVP(backFunc, ss_Vector, idmat[:, n - n_v + i])
     end
-
+    
     return JBI
 end
 
@@ -42,18 +76,20 @@ function JacobianFI(a_seq::Vector{Matrix{Float64}}, # vector of steady state val
     n = (T-1) * n_v
     
     # Initialize vectors
-    ss_xVec = repeat([values(start_ss.ssVars)...], T-1)
+    xVec = repeat([values(start_ss.ssVars)...], T-1)
     idmat = sparse(1.0I, n, n)
-    JFI = Vector{Vector{Float64}}(undef, n_v)
+    JFI = Vector{Vector{eltype(ss_Vector)}}(undef, n_v)
+    a_vec = vcat([vec(mat) for mat in a_seq]...)
+
     
-    function forwardFunc(xVec::Vector{Float64})
-        KD = ForwardIteration(a_seq, model, start_ss)
+    function forwardFunc(aseq)
+        KD = ForwardIterationOld(aseq, model, start_ss)
         zVals = Residuals(xVec, KD, model)
         return zVals
     end
     
     for i in 1:n_v
-        JFI[i] = VJP(forwardFunc, ss_xVec, idmat[:, n - n_v + i])
+        JFI[i] = VJP_RD(forwardFunc, a_vec, idmat[:, n - n_v + i])
     end
 
     return JFI
@@ -121,8 +157,8 @@ function test_SteadyState()
 end
 
 
-function forwardFunc(aseqvec::AbstractVector)
-    KD = ForwardIteration(aseqvec, mod, stst)
+function forwardFunc(aseq, mod, stst)
+    KD = ForwardIterationOld(aseq, mod, stst)
     zVals = Residuals(xVec, KD, mod)
     return zVals
 end
@@ -134,11 +170,9 @@ end
 
 # Some testing functions
 mod, stst = test_SteadyState();
-#JBI = JacobianBI(stst, mod);
 xVec = repeat([values(stst.ssVars)...], mod.CompParams.T-1);
-# a_seq = BackwardIteration(xVec, mod, stst);
-# a_seq = [convert(Matrix{Float64}, mat) for mat in a_seq];
+a_seq = BackwardIteration(xVec, mod, stst);
+a_vec = vcat([vec(mat) for mat in a_seq]...);
 # jbi = JacobianBI(stst, mod);
-# fi = ForwardIteration(a_seq, mod, stst);
 # jfi = JacobianFI(a_seq, stst, mod);
 

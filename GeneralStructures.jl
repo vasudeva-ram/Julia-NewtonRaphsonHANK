@@ -1,6 +1,6 @@
 # Imports and Uses
 using LinearAlgebra, SparseArrays, DataFrames, UnPack, NLsolve, BenchmarkTools, Interpolations
-using Zygote, ForwardDiff
+using Zygote, ForwardDiff, ReverseDiff
 
 #NOTE: The following steady-state struct is specific to the Krussell-Smith model only.
 struct SteadyState
@@ -19,14 +19,14 @@ struct ModelParams{TF<:Float64}
     α::TF # share of capital in production
 end
 
-struct ComputationalParams{TF<:Float64, TI<:Int64}
-    dx::TF # size of infinitesimal shock for numerical differentiation
-    gridx::Vector{TF} # [a_min, a_max] bounds for the savings grid
-    n_a::TI # number of grid points for the savings grid
-    n_e::TI # number of grid points for the shock grid
-    n_v::TI # number of variables in the model
-    T::TI # number of periods for the transition path
-    ε::TF # convergence/ tolerance criterion
+struct ComputationalParams
+    dx::Float64 # size of infinitesimal shock for numerical differentiation
+    gridx::Vector{Float64} # [a_min, a_max] bounds for the savings grid
+    n_a::Int64 # number of grid points for the savings grid
+    n_e::Int64 # number of grid points for the shock grid
+    n_v::Int64 # number of variables in the model
+    T::Int64 # number of periods for the transition path
+    ε::Float64 # convergence/ tolerance criterion
 end
 
 struct SequenceModel
@@ -153,10 +153,15 @@ function JVP(func::Function,
     return res
 end
 
-# alternate
-function altJVP(func, primal, tangent)
+
+function JVP(func::Function, 
+    primal::Vector{Vector{Float64}}, 
+    tangent::Vector{Vector{Float64}})
+
     g(t) = func(primal + t*tangent)
-    return ForwardDiff.derivative(g, 0.0)
+    res = ForwardDiff.derivative(g, 0.0)
+    
+    return res
 end
 
 
@@ -176,8 +181,8 @@ the VJP is given by `cotangent * J`, where `J` is the Jacobian of `func` evaluat
 at the point `primal`.
 """
 function VJP(func::Function, 
-    primal::Vector{Float64}, 
-    cotangent::AbstractArray)
+    primal::Vector{Matrix{Float64}}, 
+    cotangent::SparseVector{Float64, Int64})
 
     _, func_back = pullback(func, primal)
     vjp_result, = func_back(cotangent)
@@ -201,4 +206,22 @@ function RayleighQuotient(J̅_inv::Matrix{Float64},
     y::Vector{Float64})
 
     return (y' * J̅_inv * Λxy) / (y' * y)
+end
+
+
+function VJP_RD(func::Function, 
+    primal, 
+    cotangent)
+
+    function pullback_f(x)
+        return dot(cotangent, func(x))
+    end
+    
+    tape = ReverseDiff.JacobianTape(pullback_f, primal)
+    compiled_tape = ReverseDiff.compile(tape)
+    
+    vjp_result = similar(primal)
+    ReverseDiff.jacobian!(vjp_result, compiled_tape, primal)
+
+    return vjp_result
 end
