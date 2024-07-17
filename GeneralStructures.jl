@@ -144,29 +144,13 @@ the JVP is given by `Jᵀ * tangent`, where `J` is the Jacobian of `func` evalua
 at the point `primal`.
 """
 function JVP(func::Function, 
-    primal::Vector{Float64}, 
-    tangent::AbstractArray)
+    primal::AbstractVector, 
+    tangent::SparseVector)
 
     g(t) = func(primal + t*tangent)
     res = ForwardDiff.derivative(g, 0.0)
     
-    return res
-end
-
-
-function JVP(func::Function, 
-    primal::Vector{Vector{Float64}}, 
-    tangent::Vector{Vector{Float64}})
-
-    g(t) = func(primal + t*tangent)
-    res = ForwardDiff.derivative(g, 0.0)
-    
-    return res
-end
-
-
-function testfx(x)
-    return x[1]^2 + x[2]^2
+    return sparse(res)
 end
 
 
@@ -181,13 +165,20 @@ the VJP is given by `cotangent * J`, where `J` is the Jacobian of `func` evaluat
 at the point `primal`.
 """
 function VJP(func::Function, 
-    primal::Vector{Matrix{Float64}}, 
-    cotangent::SparseVector{Float64, Int64})
+    primal::AbstractVector, 
+    cotangent::SparseVector)
 
-    _, func_back = pullback(func, primal)
-    vjp_result, = func_back(cotangent)
+    function pullback_f(x)
+        return dot(cotangent, func(x))
+    end
+    
+    tape = ReverseDiff.JacobianTape(pullback_f, primal)
+    compiled_tape = ReverseDiff.compile(tape)
+    
+    vjp_result = similar(primal)
+    ReverseDiff.jacobian!(vjp_result, compiled_tape, primal)
 
-    return vjp_result
+    return sparse(vjp_result)
 end
 
 
@@ -206,22 +197,4 @@ function RayleighQuotient(J̅_inv::Matrix{Float64},
     y::Vector{Float64})
 
     return (y' * J̅_inv * Λxy) / (y' * y)
-end
-
-
-function VJP_RD(func::Function, 
-    primal, 
-    cotangent)
-
-    function pullback_f(x)
-        return dot(cotangent, func(x))
-    end
-    
-    tape = ReverseDiff.JacobianTape(pullback_f, primal)
-    compiled_tape = ReverseDiff.compile(tape)
-    
-    vjp_result = similar(primal)
-    ReverseDiff.jacobian!(vjp_result, compiled_tape, primal)
-
-    return vjp_result
 end

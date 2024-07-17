@@ -10,13 +10,13 @@ period 1. The function returns the sequence of sparse transition matrices
 which will be used in determining the evolution of the distribution in the Forward
 Iteration algorithm.
 """
-function BackwardIteration(xVec::Union{Vector{TF}, SparseVector{TF, Int64}}, # n_v x (T-1) vector of variable values
+function BackwardIteration(xVec::Union{Vector{TF}, SparseVector{TF, Int64}}, # (n_v x T) vector of variable values
     model::SequenceModel,
     end_ss::SteadyState) where TF # has to be the ending steady state (i.e., at time period T)
     
     # Reorganize main vector
     T = model.CompParams.T
-    xMat = transpose(reshape(xVec, (model.CompParams.n_v, T-1))) # make it (T-1) x n_v matrix
+    xMat = transpose(reshape(xVec, (model.CompParams.n_v, T))) # make it (T x n_v) matrix
     
     # Initialize savings vector
     a_seq = fill(Matrix{TF}(undef, size(end_ss.ssPolicies)), T)

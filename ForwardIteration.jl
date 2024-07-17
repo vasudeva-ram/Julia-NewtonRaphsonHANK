@@ -33,7 +33,7 @@ sequence of aggregate capital demand values. There are two steps involved here:
 (2) the function fKD: D -> KD takes the sequence of distributions and obtains the 
     sequence of aggregate capital demand values.
 """
-function ForwardIteration(a_seq, # sequence of T-savings policy functions
+function ForwardIteration(a_seq, # sequence of T-1 savings policy functions
     model::SequenceModel,
     ss::SteadyState)
     
@@ -48,13 +48,13 @@ function ForwardIteration(a_seq, # sequence of T-savings policy functions
 
     # Perform forward iteration
     for i in 2:T
-        Λ = DistributionTransitionOld(a_seq[(i-2)*Tv + 1:(i-1)*Tv], model)
+        Λ = DistributionTransition(a_seq[(i-2)*Tv + 1:(i-1)*Tv], model)
         D = Λ * D
         a = a_seq[(i-1)*Tv + 1:i*Tv]
         KD[i] = dot(a, D)
     end
 
-    return KD[1:end-1]
+    return KD[1:end]
 end
 
 
