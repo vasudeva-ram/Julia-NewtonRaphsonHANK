@@ -40,21 +40,18 @@ function ForwardIteration(a_seq, # sequence of T-1 savings policy functions
     # setting up the Distributions vector
     @unpack T, n_a, n_e = model.CompParams
     Tv = n_a * n_e
-    KD = zeros(eltype(a_seq), T)
+    KD = zeros(eltype(a_seq), T-1)
+    D = ss.ssD # initial distribution is the starting steady state distribution
     
-    # initial iteration
-    D = ss.ssD
-    KD[1] = dot(a_seq[1:Tv], D)
-
     # Perform forward iteration
-    for i in 2:T
-        Λ = DistributionTransition(a_seq[(i-2)*Tv + 1:(i-1)*Tv], model)
-        D = Λ * D
+    for i in 1:T-1
         a = a_seq[(i-1)*Tv + 1:i*Tv]
         KD[i] = dot(a, D)
+        Λ = DistributionTransition(a, model)
+        D = Λ * D
     end
 
-    return KD[1:end]
+    return KD
 end
 
 

@@ -71,6 +71,7 @@ end
 
 prim = [1.0, 2.0, 3.0, 4.0]
 cotan = [1.0, 2.0, 3.0]
+cotan2 = rand(4)
 
 jac, = Zygote.jacobian(fexample, prim)
 

@@ -16,7 +16,7 @@ function BackwardIteration(xVec::Union{Vector{TF}, SparseVector{TF, Int64}}, # (
     
     # Reorganize main vector
     T = model.CompParams.T
-    xMat = transpose(reshape(xVec, (model.CompParams.n_v, T))) # make it (T x n_v) matrix
+    xMat = transpose(reshape(xVec, (model.CompParams.n_v, T-1))) # make it (T x n_v) matrix
     
     # Initialize savings vector
     a_seq = fill(Matrix{TF}(undef, size(end_ss.ssPolicies)), T)
@@ -27,7 +27,7 @@ function BackwardIteration(xVec::Union{Vector{TF}, SparseVector{TF, Int64}}, # (
         a_seq[T-i] = BackwardStep(xMat[T-i,:], a_seq[T+1-i], model)
     end
     
-    return vcat([vec(a) for a in a_seq]...)
+    return vcat([vec(a) for a in a_seq[1:T-1]]...)
 end
 
 

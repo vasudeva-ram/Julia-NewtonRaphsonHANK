@@ -51,8 +51,8 @@ end
 Returns the residuals in the dynamics, given variable
 values for the entire sequence of T periods.
 """
-function Residuals(xVec, # (n_v x T) vector of all endogenous variable values
-    KD, # sequence of capital demand values
+function Residuals(xVec, # (n_v x T-1) vector of all endogenous variable values
+    KD, # T-1 sequence of capital demand values
     Zexog, # exogenous variable values
     model::SequenceModel)
 
@@ -60,13 +60,13 @@ function Residuals(xVec, # (n_v x T) vector of all endogenous variable values
     @unpack δ, α = model.ModParams
     @unpack n_v, T = model.CompParams
 
-    xMat = transpose(reshape(xVec, (n_v, :))) # reshape to T x n_v matrix
+    xMat = transpose(reshape(xVec, (n_v, :))) # reshape to (T-1) x n_v matrix
     namedXvecs = NamedTuple{model.varXs}(Tuple([xMat[:,i] for i in 1:n_v]))
     @unpack Y, KS, r, w, Z = namedXvecs
     
     # generate lagged and exogenous variables
     KS_lag = copy(KS)
-    KS_lag[2:T] = KS[1:end-1]
+    KS_lag[2:end] = KS[1:end-1]
 
     # Initialize residuals
     residuals = [
