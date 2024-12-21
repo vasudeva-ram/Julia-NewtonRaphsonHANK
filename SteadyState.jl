@@ -284,7 +284,7 @@ zVals = SingleRun(stst, mod);
 jbi, jfi = getIntdJacobians(stst, mod);
 jdi = getDirectJacobian(stst, mod);
 jhelper = getJacobianHelper(jbi, jfi, jdi, mod);
-jfinal = getFinalJacobian(jhelper, mod);
+jfinal = getFinalJacobian(jhelper, jdi, mod);
 
 
 function backFunction(x_Vec::AbstractVector) # (n_v * T-1)-dimensional vector
