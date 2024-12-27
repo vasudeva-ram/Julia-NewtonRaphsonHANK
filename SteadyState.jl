@@ -4,6 +4,14 @@ include("BackwardIteration.jl")
 include("Aggregation.jl")
 
 
+"""
+    getDirectJacobian(ss::SteadyState, # should be the ending steady state (at time T)
+    model::SequenceModel)
+
+Obtains the first element in the jacobian calculation: 
+    ∂zᵢ/∂xⱼ = ∂zᵢ/∂xⱼ + ∑ₖ ∂fᵢ/∂aₖ * ∂aₖ/∂xⱼ
+    where zᵢ is the residual, xⱼ is the j-th endogenous variable value, and aₖ is the policy function.
+"""
 function getDirectJacobian(ss::SteadyState, # should be the ending steady state (at time T)
     model::SequenceModel)
 
@@ -66,12 +74,18 @@ function getIntdJacobians(ss::SteadyState, # should be the ending steady state (
     end
 
     # Obtain Jacobians using JVPs and VJPs
+
+    # apply forward mode differentiation
     for i in 1:n_v
         JBI[:,i] = JVP(backFunc, xVec, idmat[:, n - n_v + i])
     end
 
+    # obtain the pullback function
+    _, pullback = Zygote.pullback(forwardFunc, a_vec)
+
+    # apply reverse mode differentiation
     for i in 1:n_v
-        JFI[i,:] = VJP(forwardFunc, a_vec, idmat[:, n - n_v + i])
+        JFI[i,:] = sparse(pullback(idmat[:, n - n_v + i])[1])
     end
     
     return JBI, JFI
@@ -191,6 +205,7 @@ function getSteadyStateJacobian(ss::SteadyState, # should be the ending steady s
 end
 
 
+
 """
     get_SteadyState(model::SequenceModel;
     guess::Union{NamedTuple, nothing}=nothing)
@@ -278,15 +293,6 @@ function SingleRun(ss::SteadyState,
 end
 
 
-# Some testing functions
-mod, stst = test_SteadyState();
-zVals = SingleRun(stst, mod);
-jbi, jfi = getIntdJacobians(stst, mod);
-jdi = getDirectJacobian(stst, mod);
-jhelper = getJacobianHelper(jbi, jfi, jdi, mod);
-jfinal = getFinalJacobian(jhelper, jdi, mod);
-
-
 function backFunction(x_Vec::AbstractVector) # (n_v * T-1)-dimensional vector
     a_seq = BackwardIteration(x_Vec, mod, stst)
     return a_seq 
@@ -317,3 +323,15 @@ function directJVP(mod,
     
     return dirJacobian
 end
+
+
+
+
+# Some testing functions
+mod, stst = test_SteadyState();
+zVals = SingleRun(stst, mod);
+jbi, jfi = getIntdJacobians(stst, mod);
+jdi = getDirectJacobian(stst, mod);
+jhelper = getJacobianHelper(jbi, jfi, jdi, mod);
+jfinal = getFinalJacobian(jhelper, jdi, mod);
+jcons = getConsolidatedJacobian(jfinal, mod);

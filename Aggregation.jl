@@ -65,8 +65,7 @@ function Residuals(xVec, # (n_v x T-1) vector of all endogenous variable values
     @unpack Y, KS, r, w, Z = namedXvecs
     
     # generate lagged and exogenous variables
-    KS_lag = copy(KS)
-    KS_lag[2:end] = KS[1:end-1]
+    KS_lag = [KS[1]; KS[1:end-1]]
 
     # Initialize residuals
     residuals = [

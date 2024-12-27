@@ -1,6 +1,7 @@
 # Imports and Uses
 using LinearAlgebra, SparseArrays, DataFrames, UnPack, NLsolve, BenchmarkTools, Interpolations
 using Zygote, ForwardDiff, ReverseDiff
+import IterativeSolvers: cg
 
 #NOTE: The following steady-state struct is specific to the Krussell-Smith model only.
 struct SteadyState
@@ -182,19 +183,35 @@ function VJP(func::Function,
 end
 
 
-"""
-    RayleighQuotient(J̅_inv::Matrix{Float64},
-    Λxy::Vector{Float64},
-    y::Vector{Float64})
+function compile_tape(func::Function, 
+    primal::AbstractVector)
 
-Calculates the Rayleigh Quotient of a matrix `J̅_inv` and vectors `Λxy` and `y`.
-In our implementation, `J̅_inv` is the inverse of the Jacobian matrix evaluated 
-at the steady state, `Λxy` is the Jacobian-Vector Product (JVP) of the `Residuals` 
-function evaluated against the next guess, `y`, as the tangent vector.
-"""
-function RayleighQuotient(J̅_inv::Matrix{Float64},
-    Λxy::Vector{Float64},
-    y::Vector{Float64})
+    tape = ReverseDiff.JacobianTape(func, primal)
+    compiled_tape = ReverseDiff.compile(tape)
+    return compiled_tape
+end
 
-    return (y' * J̅_inv * Λxy) / (y' * y)
+
+
+
+"""
+    RayleighQuotient(M::Matrix{Float64},
+    z::Vector{Float64})
+
+Computes the Rayleigh quotient of a matrix `M` and a vector `z`.
+"""
+function RayleighQuotient(M::Matrix{Float64},
+    z::Vector{Float64})
+
+    return dot(z, M*z) / dot(z, z)
+end
+
+
+function exogenousZ!(namedXvars::NamedTuple, 
+    model::SequenceModel)
+
+    @unpack Z, ρ, σ = namedXvars
+    Π = model.Π
+    Z = ρ * Z + σ * sqrt(1 - ρ^2) * randn()
+    return Z
 end

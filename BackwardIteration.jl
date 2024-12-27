@@ -86,7 +86,7 @@ function BackwardSteadyState(varNs::Vector{Float64}, #TODO: annotate to support 
     newguess = guess = zeros(n_a, n_e)
     tol = 1.0
 
-    # Perform backward iIteration till convergence
+    # Perform backward iteration till convergence
     while ε < tol
         guess = newguess
         newguess = BackwardStep(varNs, guess, model)

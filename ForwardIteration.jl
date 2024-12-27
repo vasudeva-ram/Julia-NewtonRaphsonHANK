@@ -29,7 +29,7 @@ end
 Takes the optimal steady-state policy functions of the households and calculates the
 sequence of aggregate capital demand values. There are two steps involved here:
 (1) the function fD: A -> D takes the sequence of policy function and obtains the 
-    sequence of distrivutions, and
+    sequence of distributions, and
 (2) the function fKD: D -> KD takes the sequence of distributions and obtains the 
     sequence of aggregate capital demand values.
 """
@@ -40,20 +40,18 @@ function ForwardIteration(a_seq, # sequence of T-1 savings policy functions
     # setting up the Distributions vector
     @unpack T, n_a, n_e = model.CompParams
     Tv = n_a * n_e
-    KD = zeros(eltype(a_seq), T-1)
     D = ss.ssD # initial distribution is the starting steady state distribution
     
-    # Perform forward iteration
-    for i in 1:T-1
+    # Perform forward iteration and construct KD functionally
+    KD = map(1:T-1) do i
         a = a_seq[(i-1)*Tv + 1:i*Tv]
-        KD[i] = dot(a, D)
         Λ = DistributionTransition(a, model)
         D = Λ * D
+        return dot(a, D)
     end
 
     return KD
 end
-
 
 
 """
@@ -64,7 +62,7 @@ Implements the Young (2010) method for constructing the transition matrix Λ.
     Takes a policy function and constructs the transition matrix Λ
     by composing it with the exogenous transition matrix Π.
 """
-function DistributionTransition(policy, # savings policy function
+function DistributionTransition2(policy, # savings policy function
     model::SequenceModel)
     
     @unpack policygrid, Π = model
@@ -90,6 +88,38 @@ function DistributionTransition(policy, # savings policy function
             w = (policy[col] - policygrid[m-1]) / (policygrid[m] - policygrid[m-1])
             append!(Vs, (1.0 - w) .* Π[j,:])
             append!(Vs, w .* Π[j,:])
+        end
+    end
+
+    Λ = sparse(Is, Js, Vs, n_m, n_m)
+
+    return Λ
+end
+
+
+function DistributionTransition(policy, model::SequenceModel)
+    @unpack policygrid, Π = model
+    @unpack n_a, n_e = model.CompParams
+
+    n_m = n_a * n_e
+    Jbases = [(ne - 1) * n_a for ne in 1:n_e]
+
+    Is = Int64[]
+    Js = Int64[]
+    Vs = eltype(policy)[]
+
+    for col in eachindex(policy)
+        m = findfirst(x -> x >= policy[col], policygrid)
+        j = div(col - 1, n_a) + 1
+        if m == 1
+            Is = vcat(Is, m .+ Jbases)
+            Js = vcat(Js, fill(col, n_e))
+            Vs = vcat(Vs, 1.0 .* Π[j, :])
+        else
+            Is = vcat(Is, (m - 1) .+ Jbases, m .+ Jbases)
+            Js = vcat(Js, fill(col, 2 * n_e))
+            w = (policy[col] - policygrid[m - 1]) / (policygrid[m] - policygrid[m - 1])
+            Vs = vcat(Vs, (1.0 - w) .* Π[j, :], w .* Π[j, :])
         end
     end
 
