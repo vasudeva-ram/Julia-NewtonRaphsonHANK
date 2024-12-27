@@ -1,3 +1,45 @@
+# Description: This file contains the functions that calculate the residuals
+# in the dynamics and steady state of the model. The residuals are used in the
+# solution of the model, and are calculated by comparing the model's equations
+# to the actual values of the variables.
+
+
+"""
+    Residuals(x::Vector{Float64}, 
+    model::SequenceModel)
+
+Returns the residuals in the dynamics, given variable
+values for the entire sequence of T periods.
+"""
+function Residuals(xVec, # (n_v x T-1) vector of all endogenous variable values
+    KD, # T-1 sequence of capital demand values
+    Zexog, # exogenous variable values
+    model::SequenceModel)
+
+    # Unpack parameters
+    @unpack δ, α = model.ModParams
+    @unpack n_v, T = model.CompParams
+
+    xMat = transpose(reshape(xVec, (n_v, :))) # reshape to (T-1) x n_v matrix
+    namedXvecs = NamedTuple{model.varXs}(Tuple([xMat[:,i] for i in 1:n_v]))
+    @unpack Y, KS, r, w, Z = namedXvecs
+    
+    # generate lagged and exogenous variables
+    KS_lag = [KS[1]; KS[1:end-1]]
+
+    # Initialize residuals
+    residuals = [
+        Y .- (Z .* (KS_lag.^α)),
+        r .+ δ .- (α .* Z .* (KS_lag.^(α-1))),
+        w .- ((1-α) .* Z .* (KS_lag.^α)),
+        KS .- KD,
+        Z .- Zexog # exogenous variable equality
+        ]
+        
+    transRes = [(i)' for i in residuals]
+
+    return vec(reduce(vcat, transRes))
+end
 
 
 """
@@ -44,64 +86,6 @@ end
 
 
 
-"""
-    Residuals(x::Vector{Float64}, 
-    model::SequenceModel)
-
-Returns the residuals in the dynamics, given variable
-values for the entire sequence of T periods.
-"""
-function Residuals(xVec, # (n_v x T-1) vector of all endogenous variable values
-    KD, # T-1 sequence of capital demand values
-    Zexog, # exogenous variable values
-    model::SequenceModel)
-
-    # Unpack parameters
-    @unpack δ, α = model.ModParams
-    @unpack n_v, T = model.CompParams
-
-    xMat = transpose(reshape(xVec, (n_v, :))) # reshape to (T-1) x n_v matrix
-    namedXvecs = NamedTuple{model.varXs}(Tuple([xMat[:,i] for i in 1:n_v]))
-    @unpack Y, KS, r, w, Z = namedXvecs
-    
-    # generate lagged and exogenous variables
-    KS_lag = [KS[1]; KS[1:end-1]]
-
-    # Initialize residuals
-    residuals = [
-        Y .- (Z .* (KS_lag.^α)),
-        r .+ δ .- (α .* Z .* (KS_lag.^(α-1))),
-        w .- ((1-α) .* Z .* (KS_lag.^α)),
-        KS .- KD,
-        Z .- Zexog # exogenous variable equality
-        ]
-        
-    transRes = [(i)' for i in residuals]
-
-    return vec(reduce(vcat, transRes))
-end
-
-
-
-function get_KDemand(a_seq::Vector{Matrix{Float64}},
-    D_seq::Vector{Vector{Float64}},
-    model::SequenceModel)
-
-    # Unpack parameters
-    @unpack α = model.ModParams
-
-    # Initialize vector
-    KD = Zygote.Buffer(D_seq[1], length(a_seq), )
-
-    for i in 1:length(a_seq)
-        a = vcat(a_seq[i]...)
-        KD[i] = a' * D_seq[i]
-    end
-
-    res = copy(KD)
-    
-    return res[1:end-1]
-end
 
 
 # MWE for the function

@@ -1,25 +1,7 @@
-
-"""
-    invariant_dist(Π::AbstractMatrix;
-    method::Int64 = 1,
-    ε::Float64 = 1e-9,
-    itermax::Int64 = 50000,
-    initVector::Union{Nothing, Vector{Float64}}=nothing,
-    verbose::Bool = false
-    )
-
-Calculates the invariant distribution of a Markov chain with transition matrix Π.
-"""
-function invariant_dist(Π::Union{Matrix{Float64}, Adjoint{Float64, SparseMatrixCSC{Float64, Int64}}})
-
-    ΠT = Π' # transpose
-
-    # https://discourse.julialang.org/t/stationary-distribution-with-sparse-transition-matrix/40301/8
-    D = [1; (I - ΠT[2:end, 2:end]) \ Vector(ΠT[2:end,1])]
-
-    return D ./ sum(D) # return normalized to sum to 1.0
-end
-
+# Description: This file contains the functions that are used to perform the forward iteration
+# algorithm. The algorithm starts from the optimal policy functions of the households and
+# calculates the sequence of aggregate capital demand values, using the evolution of the 
+# distribution.
 
 """
     ForwardIteration(a_seq, # sequence of T-savings policy functions
@@ -97,7 +79,19 @@ function DistributionTransition2(policy, # savings policy function
 end
 
 
-function DistributionTransition(policy, model::SequenceModel)
+"""
+    DistributionTransition(policy, 
+        model::SequenceModel)
+
+Implements the Young (2010) method for constructing the transition matrix Λ.
+    Takes a policy function and constructs the transition matrix Λ
+    by composing it with the exogenous transition matrix Π.
+NOTE: Implements it in a way that avoids array mutation to accommodate
+    Zygote differentiation.
+"""
+function DistributionTransition(policy, 
+    model::SequenceModel)
+
     @unpack policygrid, Π = model
     @unpack n_a, n_e = model.CompParams
 
@@ -127,3 +121,26 @@ function DistributionTransition(policy, model::SequenceModel)
 
     return Λ
 end
+
+
+"""
+    invariant_dist(Π::AbstractMatrix;
+    method::Int64 = 1,
+    ε::Float64 = 1e-9,
+    itermax::Int64 = 50000,
+    initVector::Union{Nothing, Vector{Float64}}=nothing,
+    verbose::Bool = false
+    )
+
+Calculates the invariant distribution of a Markov chain with transition matrix Π.
+"""
+function invariant_dist(Π::Union{Matrix{Float64}, Adjoint{Float64, SparseMatrixCSC{Float64, Int64}}})
+
+    ΠT = Π' # transpose
+
+    # https://discourse.julialang.org/t/stationary-distribution-with-sparse-transition-matrix/40301/8
+    D = [1; (I - ΠT[2:end, 2:end]) \ Vector(ΠT[2:end,1])]
+
+    return D ./ sum(D) # return normalized to sum to 1.0
+end
+

@@ -1,17 +1,32 @@
-# Implementing Boehl (2024) ``HANK on Speed" methodology
+# Description: Newton-Raphson algorithm for solving for the equilibrium of the model
+# based on Boehl(2021)
 
+function NewtonRaphsonHANK(x_0::Vector{Float64}, # initial guess for x
+    J̅::SparseMatrixCSC, # inverse of the steady-state Jacobian
+    mod::SequenceModel,
+    stst::SteadyState, #TODO: assumes starting and ending steady states are the same!!!!!!!
+    Zexog::Vector{Float64}; # exogenous variable values
+    ε = 1e-9) # tolerance level
 
-function VarSequences(df::DataFrame) # dataframe consisting of T-1 rows and n_v columns
-    field_names = map(Symbol, names(df))
-    field_values = [Vector(df[!, name]) for name in field_names]
-    return (; (field_names .=> field_values)...)
+    @unpack T = mod.CompParams
+    
+    x = x_0
+    x_new = zeros(length(x))
+    y = zeros(length(x))
+    
+    while ε < norm(x - x_new)
+        y = x - x_new
+        y_new = y_Iteration(J̅, x, y, Zexog, mod, stst)
+        x_new = x_new - y_new
+    end
+
+    return x_new
 end
-
 
 
 function y_Iteration(J̅::SparseMatrixCSC,
     x::Vector{Float64}, # evaluation point (primal)
-    y_init::Vector{Float64}, # initial guess for y (tangent)
+    y::Vector{Float64}, # initial guess for y (tangent)
     Zexog::Vector{Float64}, # exogenous variable values
     mod::SequenceModel,
     stst::SteadyState; #TODO: assumes starting and ending steady states are the same!!!!!!!
@@ -28,49 +43,27 @@ function y_Iteration(J̅::SparseMatrixCSC,
     end
     
     # Initialize iteration
-    y_old = zeros(length(y_init))
-    y_new = y_init
+    y_old = zeros(length(y))
+    Fx = fullFunction(x)
     
-    while ε < norm(y_old - y_new)
-        y = y_new
-        α_old = α
-
-        Fx = fullFunction(x)
-        Λxy = JVP(fullFunction, x, y_old)
+    while ε < norm(y - y_old)
+        # obtain rayleigh quotients
+        Λxy = JVP(fullFunction, x, y)
         M = cg(J̅, Λxy) # conjugate gradient to get J̅⁻¹ * Λ(x,y)
-        α = min(α_old, γ / abs(RayleighQuotient(M, y_old)))
         R = cg(J̅, Fx - Λxy) # conjugate gradient to get J̅⁻¹ * (F(x) - Λ(x,y))
         
-        y_new = y + α * R
+        # update α's
+        α_old = α
+        ray = dot(y, M) / dot(y, y)
+        α = min(α_old, γ / abs(ray))
+        
+        # update y
+        y_old = y
+        y = y_old + α * R
     end
     
-    return y_new
+    return y
 end
-
-
-function NewtonRaphson(x_0::Vector{Float64}, # initial guess for x
-    J̅::SparseMatrixCSC, # inverse of the steady-state Jacobian
-    mod::SequenceModel,
-    stst::SteadyState; #TODO: assumes starting and ending steady states are the same!!!!!!!
-    ε = 1e-9) # tolerance level
-
-    @unpack T = mod.CompParams
-    
-    x = zeros(length(x_0))
-    x_new = x_0
-    y = zeros(length(x))
-    Zexog = [0.85^t for t in 1:T-1]
-    Zexog = 1.0 .+ Zexog
-
-    while ε < norm(x - x_new)
-        x = x_new
-        tangent = y_Iteration(J̅, x, y, Zexog, mod, stst)
-        x_new = x - tangent
-    end
-
-    return x_new
-end
-
 
 
 # Testing functions
@@ -83,4 +76,10 @@ function test_Vec2Vec_JVP(x::Vector{<:Real})
     return append!(vec(x * x'), vec(x * x' + Matrix(1.0I, length(x), length(x))))
 end
 
+
+function VarSequences(df::DataFrame) # dataframe consisting of T-1 rows and n_v columns
+    field_names = map(Symbol, names(df))
+    field_values = [Vector(df[!, name]) for name in field_names]
+    return (; (field_names .=> field_values)...)
+end
 
