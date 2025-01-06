@@ -4,6 +4,7 @@ include("BackwardIteration.jl")
 include("Aggregation.jl")
 include("SteadyState.jl")
 include("SteadyStateJacobian.jl")
+include("NewtonRaphson.jl")
 
 
 function solveModel(mod::SequenceModel, 
@@ -35,7 +36,15 @@ zVals = SingleRun(stst, mod);
 # jhelper = getJacobianHelper(jbi, jfi, jdi, mod);
 # jfinal = getFinalJacobian(jhelper, jdi, mod);
 # jcons = getConsolidatedJacobian(jfinal, mod);
-j̅ = getSteadyStateJacobian(stst, mod);
-
+T = mod.CompParams.T;
+J̅ = getSteadyStateJacobian(stst, mod);
+iluJ = ilu(J̅); # incomplete LU factorization
+Jinv =  approximate_inverse_ilu(iluJ, size(J̅)[1]); # approximate inverse
+xVec = repeat([values(stst.ssVars)...], T-1); # steady state values
+# Exogenous variable
+shock = [0.8^t for t in 1:T-1];
+Zexog = 1.0 .+ shock;
+# Obtain the solution
+x_fin = NewtonRaphsonHANK(xVec, J̅, mod, stst, Zexog);
 
 

@@ -13,15 +13,15 @@ values for the entire sequence of T periods.
 """
 function Residuals(xVec, # (n_v x T-1) vector of all endogenous variable values
     KD, # T-1 sequence of capital demand values
-    Zexog, # exogenous variable values
+    exogZ, # exogenous variable values
     model::SequenceModel)
 
     # Unpack parameters
     @unpack δ, α = model.ModParams
     @unpack n_v, T = model.CompParams
 
-    xMat = transpose(reshape(xVec, (n_v, :))) # reshape to (T-1) x n_v matrix
-    namedXvecs = NamedTuple{model.varXs}(Tuple([xMat[:,i] for i in 1:n_v]))
+    xMat = reshape(xVec, (n_v, T-1)) # reshape to (n_v, T-1) matrix
+    namedXvecs = NamedTuple{model.varXs}(Tuple([xMat[i, :] for i in 1:n_v]))
     @unpack Y, KS, r, w, Z = namedXvecs
     
     # generate lagged and exogenous variables
@@ -33,7 +33,7 @@ function Residuals(xVec, # (n_v x T-1) vector of all endogenous variable values
         r .+ δ .- (α .* Z .* (KS_lag.^(α-1))),
         w .- ((1-α) .* Z .* (KS_lag.^α)),
         KS .- KD,
-        Z .- Zexog # exogenous variable equality
+        Z .- exogZ, # exogenous variable equality
         ]
         
     transRes = [(i)' for i in residuals]

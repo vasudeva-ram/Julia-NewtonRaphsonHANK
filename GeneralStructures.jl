@@ -1,6 +1,6 @@
 # Imports and Uses
 using LinearAlgebra, SparseArrays, DataFrames, UnPack, NLsolve, BenchmarkTools, Interpolations
-using Zygote, ForwardDiff, ReverseDiff
+using Zygote, ForwardDiff, IncompleteLU
 import IterativeSolvers: cg
 
 #NOTE: The following steady-state struct is specific to the Krussell-Smith model only.
@@ -146,7 +146,7 @@ at the point `primal`.
 """
 function JVP(func::Function, 
     primal::AbstractVector, 
-    tangent::SparseVector)
+    tangent::AbstractVector)
 
     g(t) = func(primal + t*tangent)
     res = ForwardDiff.derivative(g, 0.0)
@@ -165,31 +165,31 @@ Given a function `func`, a primal point `primal`, and a cotangent vector `cotang
 the VJP is given by `cotangent * J`, where `J` is the Jacobian of `func` evaluated
 at the point `primal`.
 """
-function VJP(func::Function, 
-    primal::AbstractVector, 
-    cotangent::SparseVector)
+# function VJP(func::Function, 
+#     primal::AbstractVector, 
+#     cotangent::SparseVector)
 
-    function pullback_f(x)
-        return dot(cotangent, func(x))
-    end
+#     function pullback_f(x)
+#         return dot(cotangent, func(x))
+#     end
     
-    tape = ReverseDiff.JacobianTape(pullback_f, primal)
-    compiled_tape = ReverseDiff.compile(tape)
+#     tape = ReverseDiff.JacobianTape(pullback_f, primal)
+#     compiled_tape = ReverseDiff.compile(tape)
     
-    vjp_result = similar(primal)
-    ReverseDiff.jacobian!(vjp_result, compiled_tape, primal)
+#     vjp_result = similar(primal)
+#     ReverseDiff.jacobian!(vjp_result, compiled_tape, primal)
 
-    return sparse(vjp_result)
-end
+#     return sparse(vjp_result)
+# end
 
 
-function compile_tape(func::Function, 
-    primal::AbstractVector)
+# function compile_tape(func::Function, 
+#     primal::AbstractVector)
 
-    tape = ReverseDiff.JacobianTape(func, primal)
-    compiled_tape = ReverseDiff.compile(tape)
-    return compiled_tape
-end
+#     tape = ReverseDiff.JacobianTape(func, primal)
+#     compiled_tape = ReverseDiff.compile(tape)
+#     return compiled_tape
+# end
 
 
 
@@ -214,4 +214,20 @@ function exogenousZ!(namedXvars::NamedTuple,
     Π = model.Π
     Z = ρ * Z + σ * sqrt(1 - ρ^2) * randn()
     return Z
+end
+
+
+# Function to approximate the inverse using ILU
+function approximate_inverse_ilu(iluJ, n)
+    Jinv = spzeros(n, n)  # Initialize the inverse matrix
+    Iden = sparse(I, n, n)  # Identity matrix
+
+    # Solve J̅ * x = e_i for each column e_i of the identity matrix
+    for i in 1:n
+        e_i = Iden[:, i]
+        x_i = iluJ \ e_i
+        Jinv[:, i] = x_i
+    end
+
+    return Jinv
 end

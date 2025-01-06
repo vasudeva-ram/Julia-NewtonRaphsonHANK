@@ -96,7 +96,7 @@ function backFunction(x_Vec::AbstractVector) # (n_v * T-1)-dimensional vector
 end
 
 
-function directJVP(mod, 
+function directJVPJacobian(mod, 
     stst)
 
     @unpack T, n_v = mod.CompParams
@@ -104,8 +104,8 @@ function directJVP(mod,
     idmat = sparse(1.0I, n, n)
     xVec = repeat([values(stst.ssVars)...], T-1)
     Zexog = ones(T-1)
-    dirJacobian = spzeros(n, n_v)
-
+    dirJacobian = spzeros(n, n)
+    
     function fullFunction(x_Vec::AbstractVector) # (n_v * T-1)-dimensional vector
         a_seq = BackwardIteration(x_Vec, mod, stst)
         KD = ForwardIteration(a_seq, mod, stst)
@@ -114,12 +114,41 @@ function directJVP(mod,
     end
     
     for i in 1:n_v
-        # dirJacobian[:,i] = JVP(fullFunction, xVec, idmat[:, n - n_v + i])
+        # dirJacobian[:,n - n_v + i] = JVP(fullFunction, xVec, idmat[:, n - n_v + i])
         dirJacobian[:,i] = JVP(fullFunction, xVec, idmat[:,i])
     end
     
     return dirJacobian
 end
+
+
+function directNumJacobian(mod, 
+    stst)
+
+    @unpack T, n_v = mod.CompParams
+    n = (T - 1) * n_v
+    idmat = sparse(1.0I, n, n)
+    xVec = repeat([values(stst.ssVars)...], T-1)
+    Zexog = ones(T-1)
+    dirJacobian = spzeros(n, n)
+    
+    function fullFunction(x_Vec::AbstractVector) # (n_v * T-1)-dimensional vector
+        a_seq = BackwardIteration(x_Vec, mod, stst)
+        KD = ForwardIteration(a_seq, mod, stst)
+        zVals = Residuals(x_Vec, KD, Zexog, mod)
+        return zVals
+    end
+    
+    fullX = fullFunction(xVec)
+
+    for i in 1:n_v
+        xDiff = xVec + (1e-4 * idmat[:,i])
+        dirJacobian[:,i] = fullFunction(xDiff) - fullX
+    end
+    
+    return dirJacobian ./ 1e-4
+end
+
 
 
 

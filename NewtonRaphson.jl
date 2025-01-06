@@ -13,6 +13,7 @@ function NewtonRaphsonHANK(x_0::Vector{Float64}, # initial guess for x
     x = x_0
     x_new = zeros(length(x))
     y = zeros(length(x))
+    y_new = zeros(length(x))
     
     while ε < norm(x - x_new)
         y = x - x_new
@@ -26,12 +27,12 @@ end
 
 function y_Iteration(J̅::SparseMatrixCSC,
     x::Vector{Float64}, # evaluation point (primal)
-    y::Vector{Float64}, # initial guess for y (tangent)
+    y_init::Vector{Float64}, # initial guess for y (tangent)
     Zexog::Vector{Float64}, # exogenous variable values
     mod::SequenceModel,
     stst::SteadyState; #TODO: assumes starting and ending steady states are the same!!!!!!!
-    α::Float64=0.5,
-    γ::Float64=0.5,
+    α::Float64=1.5,
+    γ::Float64=1.5,
     ε = 1e-9)
 
     # define full function
@@ -43,8 +44,13 @@ function y_Iteration(J̅::SparseMatrixCSC,
     end
     
     # Initialize iteration
-    y_old = zeros(length(y))
+    y = y_init
+    y_old = ones(length(y))
+    Λxy = zeros(length(y))
+    M = zeros(length(y))
+    R = zeros(length(y))
     Fx = fullFunction(x)
+
     
     while ε < norm(y - y_old)
         # obtain rayleigh quotients

@@ -45,7 +45,7 @@ function getDirectJacobian(ss::SteadyState, # should be the ending steady state 
     # Initialize vectors
     xVec = repeat([values(ss.ssVars)...], T-1)
     idmat = sparse(1.0I, n, n)
-    Zexog = ones(T-1)
+    exogZ = ones(T-1)
     JDI = zeros(n, n_v)
 
     # Obtain steady state a_vec
@@ -54,7 +54,7 @@ function getDirectJacobian(ss::SteadyState, # should be the ending steady state 
     # Define backward and forward functions
     function fullFunc(x_Vec::AbstractVector) # (n_v * T-1)-dimensional vector
         KD = ForwardIteration(a_vec, model, ss)
-        zVals = Residuals(x_Vec, KD, Zexog, model)
+        zVals = Residuals(x_Vec, KD, exogZ, model)
         return zVals
     end
 
@@ -86,7 +86,7 @@ function getIntdJacobians(ss::SteadyState, # should be the ending steady state (
     xVec = repeat([values(ss.ssVars)...], T-1) # (n_v * T-1)-dimensional vector
     a_vec = repeat(vec(ss.ssPolicies), T-1)
     idmat = sparse(1.0I, n, n)
-    Zexog = ones(T-1) #TODO: Zexog should be part of he SteadyState object
+    exogZ = ones(T-1) #TODO: exogZ should be part of the SteadyState object
     JBI = spzeros(nJ, n_v)
     JFI = spzeros(n_v, nJ)
 
@@ -98,7 +98,8 @@ function getIntdJacobians(ss::SteadyState, # should be the ending steady state (
 
     function forwardFunc(aseq) # (n_a x n_e x T-1) x 1 vector
         KD = ForwardIteration(aseq, model, ss)
-        zVals = Residuals(xVec, KD, Zexog, model)
+        zVals = Residuals(xVec, KD, exogZ, model)
+        # zVals = ResidualsSteadyState(xVec, aseq, ss.ssD, model)
         return zVals
     end
 
@@ -111,7 +112,7 @@ function getIntdJacobians(ss::SteadyState, # should be the ending steady state (
 
     # obtain the pullback function
     _, pullback = Zygote.pullback(forwardFunc, a_vec)
-
+    
     # apply reverse mode differentiation
     for i in 1:n_v
         JFI[i,:] = sparse(pullback(idmat[:, n - n_v + i])[1])
