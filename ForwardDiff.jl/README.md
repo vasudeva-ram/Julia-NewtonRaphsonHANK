@@ -1,3 +1,28 @@
+# IMPORTANT: Vasu's note
+This is the version of ForwardDiff.jl that is currently used in evaluating forward mode autodifferentiation.
+It differs from the release branch version `0.10.38` in that it contains a [cherry-picked](https://stackoverflow.com/questions/9339429/what-does-cherry-picking-a-commit-with-git-mean) merge of [PR #481](https://github.com/JuliaDiff/ForwardDiff.jl/pull/481) from the master DEV branch of the ForwardDiff module.
+
+**For future Vasu and/or Vasu-replacements**: The use of this version of ForwardDiff is pinned, which means that `Pkg.update()` will not replace this version with future ForwardDiff versions.
+If #481 ever makes it from the master DEV branch to release, you can unpin this and update as needed.
+
+## More details on this version
+For the implementation of the Newton Raphson method in solving Het-agent models, I use both ForwardDiff and Zygote packages for forward mode and reverse mode automatic differentiation. However, in evaluating the Jacobian of the model, I run into a problem.
+
+The problem has two elements. First, the jacobian is stored as a sparse matrix for speed and efficiency purposes.
+Second, the jacobian is evaluated at the steady state where the residuals of the model are approximately zero.
+In the case of the exogenous variables, it is precisely zero.
+This poses a problem because ForwardDiff evaluates the sparsity structure of the steady state before evaluating the gradient, which results in the derivative of the exogenous variable being evaluated as 0.0 when it should be non-zero.
+This problem is fixed by Pull Request #481 of the ForwardDiff module.
+
+Identifying this problem was hard enough, but addressing it is further complicated by the fact that the pull request is only implemented in the DEV branch of the module.
+I tried to use the DEV branch directly (instead of the release branch), but this ended up having conflicts with the current version of Zygote.
+I tried using ReverseDiff instead, but ran into the same problem.
+Thus, as a temporary solution, I have cherry picked the updates implemented in #481 and implemented them in this version of ForwardDiff.jl.
+This version is pinned so that future releases of ForwardDiff do not replace this.
+In the future, this will have to be revisited and the 48-updated version of the ForwardDiff release would have to be used.
+
+
+
 [![CI](https://github.com/JuliaDiff/ForwardDiff.jl/workflows/CI/badge.svg)](https://github.com/JuliaDiff/ForwardDiff.jl/actions/workflows/ci.yml)
 [![Coverage Status](https://coveralls.io/repos/JuliaDiff/ForwardDiff.jl/badge.svg?branch=master&service=github)](https://coveralls.io/github/JuliaDiff/ForwardDiff.jl?branch=master)
 
