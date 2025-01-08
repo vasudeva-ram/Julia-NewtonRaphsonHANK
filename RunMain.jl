@@ -38,13 +38,14 @@ zVals = SingleRun(stst, mod);
 # jcons = getConsolidatedJacobian(jfinal, mod);
 T = mod.CompParams.T;
 J̅ = getSteadyStateJacobian(stst, mod);
-iluJ = ilu(J̅); # incomplete LU factorization
-Jinv =  approximate_inverse_ilu(iluJ, size(J̅)[1]); # approximate inverse
+iluJ = ilu(J̅, τ=0.001); # incomplete LU factorization
+precond = (iluJ.L + sparse(I, size(iluJ.L))) * iluJ.U';
+# Jinv =  approximate_inverse_ilu(iluJ, size(J̅)[1]); # approximate inverse
 xVec = repeat([values(stst.ssVars)...], T-1); # steady state values
 # Exogenous variable
 shock = [0.8^t for t in 1:T-1];
 Zexog = 1.0 .+ shock;
 # Obtain the solution
-x_fin = NewtonRaphsonHANK(xVec, J̅, mod, stst, Zexog);
+x_fin = NewtonRaphsonHANK(xVec, J̅, precond, mod, stst, Zexog);
 
 

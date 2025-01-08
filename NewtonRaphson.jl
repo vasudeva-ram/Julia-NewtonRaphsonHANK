@@ -3,6 +3,7 @@
 
 function NewtonRaphsonHANK(x_0::Vector{Float64}, # initial guess for x
     J̅::SparseMatrixCSC, # inverse of the steady-state Jacobian
+    precond::SparseMatrixCSC, # incomplete LU factorization of J̅
     mod::SequenceModel,
     stst::SteadyState, #TODO: assumes starting and ending steady states are the same!!!!!!!
     Zexog::Vector{Float64}; # exogenous variable values
@@ -10,15 +11,16 @@ function NewtonRaphsonHANK(x_0::Vector{Float64}, # initial guess for x
 
     @unpack T = mod.CompParams
     
-    x = x_0
-    x_new = zeros(length(x))
+    x_new = x_0
+    x = zeros(length(x_0))
     y = zeros(length(x))
     y_new = zeros(length(x))
     
     while ε < norm(x - x_new)
         y = x - x_new
-        y_new = y_Iteration(J̅, x, y, Zexog, mod, stst)
-        x_new = x_new - y_new
+        y_new = y_Iteration(J̅, precond, x_new, y, Zexog, mod, stst)
+        x = x_new
+        x_new = x - y_new
     end
 
     return x_new
@@ -26,6 +28,7 @@ end
 
 
 function y_Iteration(J̅::SparseMatrixCSC,
+    precond::SparseMatrixCSC,
     x::Vector{Float64}, # evaluation point (primal)
     y_init::Vector{Float64}, # initial guess for y (tangent)
     Zexog::Vector{Float64}, # exogenous variable values
@@ -55,8 +58,8 @@ function y_Iteration(J̅::SparseMatrixCSC,
     while ε < norm(y - y_old)
         # obtain rayleigh quotients
         Λxy = JVP(fullFunction, x, y)
-        M = cg(J̅, Λxy) # conjugate gradient to get J̅⁻¹ * Λ(x,y)
-        R = cg(J̅, Fx - Λxy) # conjugate gradient to get J̅⁻¹ * (F(x) - Λ(x,y))
+        IterativeSolvers.gmres!(R, J̅, Fx - Λxy, Pr=precond) # restarted GMRes to get J̅⁻¹ * (F(x) - Λ(x,y))
+        IterativeSolvers.gmres!(M, J̅, Λxy, Pr=precond) # restarted GMRes to get J̅⁻¹ * Λ(x,y)
         
         # update α's
         α_old = α
@@ -65,10 +68,20 @@ function y_Iteration(J̅::SparseMatrixCSC,
         
         # update y
         y_old = y
-        y = y_old + α * R
+        y = y_old + (α * R)
     end
     
     return y
+end
+
+
+function alphaUpdate(α::Float64,
+    γ::Float64,
+    x::Vector{Float64},
+    y::Vector{Float64}
+    )
+    
+    return
 end
 
 

@@ -1,7 +1,6 @@
 # Imports and Uses
 using LinearAlgebra, SparseArrays, DataFrames, UnPack, NLsolve, BenchmarkTools, Interpolations
-using Zygote, ForwardDiff, IncompleteLU
-import IterativeSolvers: cg
+using Zygote, ForwardDiff, IncompleteLU, IterativeSolvers
 
 #NOTE: The following steady-state struct is specific to the Krussell-Smith model only.
 struct SteadyState
