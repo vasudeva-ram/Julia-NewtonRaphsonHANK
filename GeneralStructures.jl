@@ -1,6 +1,6 @@
 # Imports and Uses
 using LinearAlgebra, SparseArrays, DataFrames, UnPack, NLsolve, BenchmarkTools, Interpolations
-using Zygote, ForwardDiff, IncompleteLU, IterativeSolvers
+using Zygote, ForwardDiff, IncompleteLU, IterativeSolvers, TOML
 
 #NOTE: The following steady-state struct is specific to the Krussell-Smith model only.
 struct SteadyState
@@ -229,4 +229,11 @@ function approximate_inverse_ilu(iluJ, n)
     end
 
     return Jinv
+end
+
+
+macro unpack_all(q)
+    quote
+        
+    end
 end

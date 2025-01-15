@@ -104,3 +104,93 @@ function ffunc(x::Vector{Float64})
     # return vcat(vcat(res'...)...)
     return copy(reduce(vcat, reduce(vcat, res')))
 end
+
+
+
+"""
+    equation_residuals(equations::Vector{String}, vars::NamedTuple, params::NamedTuple)
+
+Evaluate a set of string-based mathematical equations over multiple data points and parameters,
+returning a vector of residuals (LHS - RHS for each equation at each row).
+
+# Arguments
+- `equations`: A vector of strings, each representing an equation with an "=" sign, e.g. `["x + y = z", "y^2 = a"]`.
+- `vars`: A named tuple with variable names as keys and `Vector{Float64}` values.
+           Each variable vector is assumed to have the same length.
+- `params`: A named tuple with parameter names as keys and `Float64` values (scalars).
+
+# Returns
+- A `Vector{Float64}` containing the residuals. Its length is
+  `length(equations) * (length of variable vectors)`.
+"""
+function equation_residuals(equations::Vector{String}, 
+    vars::NamedTuple, 
+    params::NamedTuple)
+    
+    # Helper function to evaluate an expression (Expr) in a "local" environment constructed from a dictionary.
+    # It effectively creates a `let ... end` block that binds each key in `env` to its corresponding value.
+    function eval_in_env(expr::Expr, env::Dict{Symbol,Any})
+        # Construct an expression of the form:
+        # let
+        #   var1 = env[var1]
+        #   var2 = env[var2]
+        #   ...
+        #   <original expr>
+        # end
+        let_block = :($(Expr(:block)))
+        for (k, v) in env
+            push!(let_block.args, :($(k) = $v))
+        end
+        # Now push the expression we want to evaluate
+        push!(let_block.args, expr)
+        # Wrap it all in a `let ... end` block
+        let_expr = :(let
+            $let_block
+        end)
+        return eval(let_expr)
+    end
+
+    # 1) Extract the length N of each variable vector (assuming all are the same size).
+    N = length(first(values(vars)))  # e.g., if `x = [1.0, 2.0, 3.0]` then N = 3
+
+    # 2) Prepare a result vector. We’ll store residuals in order:
+    #    eq1(row1), eq2(row1), ..., eqM(row1), eq1(row2), eq2(row2), ...
+    M = length(equations)
+    residuals = Vector{Float64}(undef, M * N)
+
+    idx = 1
+    for i in 1:N
+        # For each row, build a dictionary of local variable bindings for evaluation.
+        env = Dict{Symbol, Any}()
+
+        # Add parameters (scalars) to env
+        for (pname, pval) in pairs(params)
+            env[pname] = pval
+        end
+
+        # Add variables for the i-th row to env
+        for (vname, vvals) in pairs(vars)
+            env[vname] = vvals[i]
+        end
+
+        # Evaluate each equation, compute LHS - RHS, and store in residuals vector
+        for eq in equations
+            eq_parts = split(eq, "=")
+            if length(eq_parts) != 2
+                error("Each equation string must contain exactly one '=' sign.")
+            end
+
+            lhs_str, rhs_str = strip(eq_parts[1]), strip(eq_parts[2])
+            lhs_expr = Meta.parse(lhs_str)
+            rhs_expr = Meta.parse(rhs_str)
+
+            lhs_val = eval_in_env(lhs_expr, env)
+            rhs_val = eval_in_env(rhs_expr, env)
+
+            residuals[idx] = lhs_val - rhs_val
+            idx += 1
+        end
+    end
+
+    return residuals
+end

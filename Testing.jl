@@ -80,3 +80,8 @@ vjp_a = cotan' * jac
 vjp_b = VJP_Old(fexample, prim, cotan)
 vjp_c = VJP_new(fexample, prim, cotan)
 vjp_d = VJP_RD(fexample, prim, cotan)
+
+
+@profile ForwardIteration(a_seq, mod, stst);
+Profile.print()
+ProfileView.view()

@@ -44,7 +44,7 @@ Implements the Young (2010) method for constructing the transition matrix Λ.
     Takes a policy function and constructs the transition matrix Λ
     by composing it with the exogenous transition matrix Π.
 """
-function DistributionTransition2(policy, # savings policy function
+function DistributionTransition1(policy, # savings policy function
     model::SequenceModel)
     
     @unpack policygrid, Π = model
@@ -89,7 +89,7 @@ Implements the Young (2010) method for constructing the transition matrix Λ.
 NOTE: Implements it in a way that avoids array mutation to accommodate
     Zygote differentiation.
 """
-function DistributionTransition(policy, 
+function DistributionTransition2(policy, 
     model::SequenceModel)
 
     @unpack policygrid, Π = model
@@ -144,3 +144,4 @@ function invariant_dist(Π::Union{Matrix{Float64}, Adjoint{Float64, SparseMatrix
     return D ./ sum(D) # return normalized to sum to 1.0
 end
 
+DistributionTransition = DistributionTransition2
