@@ -194,13 +194,12 @@ at the point `primal`.
 
 
 """
-    RayleighQuotient(M::Matrix{Float64},
-    z::Vector{Float64})
+    RayleighQuotient(M, z)
 
 Computes the Rayleigh quotient of a matrix `M` and a vector `z`.
+Inputs should be AbstractMatrix and AbstractVector.
 """
-function RayleighQuotient(M::Matrix{Float64},
-    z::Vector{Float64})
+function RayleighQuotient(M, z)
 
     return dot(z, M*z) / dot(z, z)
 end

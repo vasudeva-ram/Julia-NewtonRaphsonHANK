@@ -134,7 +134,7 @@ end
 
 Calculates the invariant distribution of a Markov chain with transition matrix Π.
 """
-function invariant_dist(Π::Union{Matrix{Float64}, Adjoint{Float64, SparseMatrixCSC{Float64, Int64}}})
+function invariant_dist(Π)
 
     ΠT = Π' # transpose
 

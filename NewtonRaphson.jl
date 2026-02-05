@@ -30,9 +30,9 @@ end
 
 
 function y_Iteration(J̅::SparseMatrixCSC,
-    x::Vector{Float64}, # evaluation point (primal)
-    y0::Vector{Float64}, # search direction (dual)
-    Zexog::Vector{Float64}, # exogenous variable values
+    x, # evaluation point (primal)
+    y0, # search direction (dual)
+    Zexog, # exogenous variable values
     mod::SequenceModel,
     stst::SteadyState; #TODO: assumes starting and ending steady states are the same!!!!!!!
     precond::Union{SparseMatrixCSC, Nothing}=nothing,

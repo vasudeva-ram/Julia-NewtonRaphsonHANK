@@ -16,14 +16,15 @@ period 1. The function returns the sequence of sparse transition matrices
 which will be used in determining the evolution of the distribution in the Forward
 Iteration algorithm.
 """
-function BackwardIteration(xVec::Union{Vector{TF}, SparseVector{TF, Int64}}, # (n_v x T-1) vector of variable values
+function BackwardIteration(xVec, # (n_v x T-1) vector of variable values
     model::SequenceModel,
-    end_ss::SteadyState) where TF # has to be the ending steady state (i.e., at time period T)
-    
+    end_ss::SteadyState) # has to be the ending steady state (i.e., at time period T)
+
     # Reorganize main vector
     T = model.CompParams.T
+    TF = eltype(xVec)
     xMat = transpose(reshape(xVec, (model.CompParams.n_v, T-1))) # make it `T-1 x n_v` matrix
-    
+
     # Initialize savings vector
     a_seq = fill(Matrix{TF}(undef, size(end_ss.ssPolicies)), T)
     a_seq[T] = end_ss.ssPolicies
@@ -47,9 +48,9 @@ Note that this step needs to be model specific. This is just the implementation
 for the Krussell-Smith model. 
 The function takes the current savings policy function and calculates the
 """
-function BackwardStep(xVals::Union{Vector{TF}, SparseVector{TF, TI}}, # (n_v x 1) vector of endogenous variable values
-    currentpolicy::Matrix{TF}, # current policy function guess 
-    model::SequenceModel) where {TF, TI}
+function BackwardStep(xVals, # (n_v x 1) vector of endogenous variable values
+    currentpolicy, # current policy function guess
+    model::SequenceModel)
 
     # Unpack objects
     @unpack policygrid, shockmat, Π, policymat = model
@@ -65,6 +66,7 @@ function BackwardStep(xVals::Union{Vector{TF}, SparseVector{TF, TI}}, # (n_v x 1
 
     # Interpolate the policy function to the grid
     impliedstate = (1 / (1 + r)) * (cmat - (w .* shockmat) + policymat)
+    TF = eltype(currentpolicy)
     griddedpolicy = Matrix{TF}(undef, size(policymat))
 
     for i in 1:model.CompParams.n_e
@@ -84,7 +86,7 @@ Applies the Endogenous Gridpoint method to find the steady state policies of
 the households.
 In essence, performs iteration on `BackwardStep()` until convergence is reached.
 """
-function BackwardSteadyState(varNs::Vector{Float64}, #TODO: annotate to support dual numbers and float64 vectors
+function BackwardSteadyState(varNs, # supports both Float64 and dual number vectors
     model::SequenceModel) # has to be the ending steady state (i.e., at time period T)
 
     # Unpack parameters
