@@ -1,57 +1,50 @@
-# Section 1: Parameter of the model and their values
-# These parameters define the behavior of agents in the economy
-[ModelParameters]
-"β" = 0.98 # discount factor
-"γ" = 1.0 # coefficient of relative risk aversion
-"δ" = 0.025 # depreciation rate
-"α" = 0.11 # share of capital in production
+# Model specification for Krusell-Smith heterogeneous agent model
+# This file demonstrates the finalized TOML structure for HANK solver
 
+[Parameters]
+β = {value = 0.98, description = "Household discount factor"}
+γ = {value = 1.0, description = "Coefficient of relative risk aversion"}
+δ = {value = 0.025, description = "Depreciation rate"}
+α = {value = 0.11, description = "Share of capital in production"}
+ρ = {value = 0.966, description = "Persistence of HH income shock process"}
+σ = {value = 0.283, description = "Std deviation of income shocks"}
 
-# Section 2: Computational parameters
-# These parameters define the computational structure of the model
-[ComputationalParameters]
-"ρ" = 0.966 # persistence of HH income shock process
-gridx = [0.0, 200.0] # bounds for the savings grid
-n_a = 200 # number of grid points for the savings grid
-n_e = 7 # number of income states for the HH
-T = 150 # number of periods for transition path
-"ε" = 1e-6 # convergence criterion
+[ModelSpecs]
+grid_type = "DoubleExponential"
+shock_discretization = "Rouwenhorst"
+gridx = [0.0, 200.0]
+n_a = 200
+n_e = 7
+T = 150
+ε = 1e-6
+dx = 1e-8
 
-# Section 3: Variable names
 [EndogenousVariables]
 Y = "Output"
 KS = "Capital supply"
+KD = "Capital demand (aggregated from HH)"
 r = "Interest rate"
 w = "Wages"
 
 [ExogenousVariables]
 Z = "Productivity"
 
-[MicroAggregatedVariables]
-KD = "Capital demand - aggregated HH Capital"
-
-
-# Section 4: Dynamic Equilibrium Conditions
-# These represent the equilibrium conditions of the model
-# that must hold for every time period
 [Equations]
-eq1 = "Y = (Z * (KS(-1)^α))"
-eq2 = "r + δ = (α * Z * (KS(-1)^(α-1)))"
-eq3 = "w = ((1-α) * Z * (KS(-1)^α))"
-eq4 = "KS = KD"
+equilibrium = [
+    "Y = Z * KS(-1)^α",
+    "r + δ = α * Z * KS(-1)^(α-1)",
+    "w = (1-α) * Z * KS(-1)^α",
+    "KS = KD"
+]
 
+[AggregatedVariables]
+KD = "agg_capital"
 
-# Section 5: Starting and ending values for exogenous 
-# and other variables for which values are known
+[ExogenousPaths]
+Z = "ar_process(0.9)"
+
 [InitialSteadyState]
 Z = 1.0
 
-# Note: if no ending steady state is provided, the 
-# model will assume the initial steady state is the 
-# ending steady state
 [EndingSteadyState]
 Z = 1.0
-
-# Section 6: Path of values for exogenous variables
-[ExogenousPath]
-Z = "ar_process(ρ=0.9)"
