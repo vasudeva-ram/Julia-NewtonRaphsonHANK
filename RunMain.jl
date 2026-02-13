@@ -1,4 +1,5 @@
 include("GeneralStructures.jl")
+include("ModelParser.jl")
 include("ForwardIteration.jl")
 include("BackwardIteration.jl")
 include("Aggregation.jl")
@@ -11,7 +12,7 @@ function solveModel(mod::SequenceModel,
     stst::SteadyState,
     j̅::SparseMatrixCSC)
     
-    T = mod.CompParams.T
+    T = mod.Params.T
 
     # steady state values
     xVec = repeat([values(stst.ssVars)...], T-1)
@@ -37,7 +38,7 @@ mod, stst = test_SteadyState();
 # jhelper = getJacobianHelper(jbi, jfi, jdi, mod);
 # jfinal = getFinalJacobian(jhelper, jdi, mod);
 # jcons = getConsolidatedJacobian(jfinal, mod);
-T = mod.CompParams.T;
+T = mod.Params.T;
 J = getSteadyStateJacobian(stst, mod);
 # iluJ = ilu(J, τ=0.01); # incomplete LU factorization
 # precond = (iluJ.L + sparse(I, size(iluJ.L))) * iluJ.U';
@@ -51,8 +52,8 @@ Zexog = 1.0 .+ shock;
 x_fin = NewtonRaphsonHANK(xVec, J, mod, stst, Zexog);
 
 
-xFinMat = reshape(x_fin, (mod.CompParams.n_v, T-1)) # reshape to (n_v, T-1) matrix
-namedXfins = NamedTuple{mod.varXs}(Tuple([xFinMat[i, :] for i in 1:mod.CompParams.n_v]))
+xFinMat = reshape(x_fin, (mod.Params.n_v, T-1)) # reshape to (n_v, T-1) matrix
+namedXfins = NamedTuple{mod.varXs}(Tuple([xFinMat[i, :] for i in 1:mod.Params.n_v]))
 
 for key in keys(namedXfins)
     plot(namedXfins[key], collect(1:T-1), label="$(key)")

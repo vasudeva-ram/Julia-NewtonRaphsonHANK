@@ -27,7 +27,7 @@ function get_SteadyState(model::SequenceModel;
     # Initialize steady state guess
     x̅ = isnothing(guess) ? rand(length(model.varNs)) : collect(values(guess))
     tol = 1.0
-    ε = model.CompParams.ε
+    ε = model.Params.ε
     
     # find steady state solution (trust region method)
     sol = nlsolve(Fx, x̅)
@@ -47,15 +47,22 @@ end
 
 function test_SteadyState()
     varXs = (:Y, :KS, :r, :w, :Z)
+    equations = (
+        "Y = Z * KS(-1)^α",
+        "r + δ = α * Z * KS(-1)^(α-1)",
+        "w = (1-α) * Z * KS(-1)^α",
+        "KS = KD",
+    )
     sig = 0.5 * sqrt(1 - (0.966^2))
-    modpars = ModelParams(0.98, 1.0, sig, 0.966, 0.025, 0.11)
-    compars = ComputationalParams(0.0001, [0.0, 200.0], 200, 7, length(varXs), 150, 1e-9)
-    policygrid = make_DoubleExponentialGrid(compars.gridx[1], compars.gridx[2], compars.n_a)
-    Π, _, shockgrid = get_RouwenhorstDiscretization(compars.n_e, modpars.ρ, modpars.σ)
+    params = ModelParams(0.98, 1.0, sig, 0.966, 0.025, 0.11,
+                         0.0001, [0.0, 200.0], 200, 7, length(varXs), 150, 1e-9)
+    residuals_fn = compile_residuals(collect(equations), varXs)
+    policygrid = make_DoubleExponentialGrid(params.gridx[1], params.gridx[2], params.n_a)
+    Π, _, shockgrid = get_RouwenhorstDiscretization(params.n_e, params.ρ, params.σ)
     policymat = repeat(policygrid, 1, length(shockgrid)) # making this n_a x n_e matrix
     shockmat = repeat(shockgrid, 1, length(policygrid))' # making this n_a x n_e matrix (note the transpose)
-        
-    mod = SequenceModel(varXs, compars, modpars, policygrid, shockmat, policymat, Π)
+
+    mod = SequenceModel(varXs, equations, params, residuals_fn, policygrid, shockmat, policymat, Π)
 
     # Obtain steady state
     ss = get_SteadyState(mod, guess = (Y = 1.0, KS = 1.0, r = 0.02, w = 0.1, Z = 1.0))
@@ -75,7 +82,7 @@ function SingleRun(ss::SteadyState,
     model::SequenceModel)
 
     # Unpack parameters
-    @unpack T, n_v = model.CompParams
+    @unpack T, n_v = model.Params
     n = (T-1) * n_v
     
     # Initialize vectors
@@ -99,7 +106,7 @@ end
 function directJVPJacobian(mod, 
     stst)
 
-    @unpack T, n_v = mod.CompParams
+    @unpack T, n_v = mod.Params
     n = (T - 1) * n_v
     idmat = sparse(1.0I, n, n)
     xVec = repeat([values(stst.ssVars)...], T-1)
@@ -125,7 +132,7 @@ end
 function directNumJacobian(mod, 
     stst)
 
-    @unpack T, n_v = mod.CompParams
+    @unpack T, n_v = mod.Params
     n = (T - 1) * n_v
     idmat = sparse(1.0I, n, n)
     xVec = repeat([values(stst.ssVars)...], T-1)

@@ -21,9 +21,9 @@ function BackwardIteration(xVec, # (n_v x T-1) vector of variable values
     end_ss::SteadyState) # has to be the ending steady state (i.e., at time period T)
 
     # Reorganize main vector
-    T = model.CompParams.T
+    T = model.Params.T
     TF = eltype(xVec)
-    xMat = transpose(reshape(xVec, (model.CompParams.n_v, T-1))) # make it `T-1 x n_v` matrix
+    xMat = transpose(reshape(xVec, (model.Params.n_v, T-1))) # make it `T-1 x n_v` matrix
 
     # Initialize savings vector
     a_seq = fill(Matrix{TF}(undef, size(end_ss.ssPolicies)), T)
@@ -54,7 +54,7 @@ function BackwardStep(xVals, # (n_v x 1) vector of endogenous variable values
 
     # Unpack objects
     @unpack policygrid, shockmat, Π, policymat = model
-    @unpack β, γ = model.ModParams
+    @unpack β, γ = model.Params
     namedvars = NamedTuple{model.varXs}(xVals)
     @unpack r, w = namedvars
 
@@ -69,7 +69,7 @@ function BackwardStep(xVals, # (n_v x 1) vector of endogenous variable values
     TF = eltype(currentpolicy)
     griddedpolicy = Matrix{TF}(undef, size(policymat))
 
-    for i in 1:model.CompParams.n_e
+    for i in 1:model.Params.n_e
         linpolate = extrapolate(interpolate((impliedstate[:,i],), policymat[:,i], Gridded(Linear())), Flat())
         griddedpolicy[:,i] = linpolate.(policymat[:,i])
     end
@@ -90,7 +90,7 @@ function BackwardSteadyState(varNs, # supports both Float64 and dual number vect
     model::SequenceModel) # has to be the ending steady state (i.e., at time period T)
 
     # Unpack parameters
-    @unpack n_a, n_e, ε, T = model.CompParams
+    @unpack n_a, n_e, ε, T = model.Params
     newguess = guess = zeros(n_a, n_e)
     tol = 1.0
 

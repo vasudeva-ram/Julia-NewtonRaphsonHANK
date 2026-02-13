@@ -11,32 +11,54 @@ struct SteadyState
 end
 
 struct ModelParams{TF<:Float64}
+    # Economic parameters
     β::TF # discount factor
     γ::TF # coefficient of relative risk aversion
     σ::TF # standard deviation of the income shock process
     ρ::TF # persistence of the shock process
     δ::TF # depreciation rate
     α::TF # share of capital in production
-end
-
-struct ComputationalParams
-    dx::Float64 # size of infinitesimal shock for numerical differentiation
+    # Computational parameters
+    dx::TF # size of infinitesimal shock for numerical differentiation
     gridx::Vector{Float64} # [a_min, a_max] bounds for the savings grid
     n_a::Int64 # number of grid points for the savings grid
     n_e::Int64 # number of grid points for the shock grid
     n_v::Int64 # number of variables in the model
     T::Int64 # number of periods for the transition path
-    ε::Float64 # convergence/ tolerance criterion
+    ε::TF # convergence/ tolerance criterion
 end
 
-struct SequenceModel
+struct SequenceModel{F}
     varXs::Tuple{Vararg{Symbol}} # tuple of all *aggregate* variable names only (exog. + endog.)
-    CompParams::ComputationalParams # parameters determining computational structure of model
-    ModParams::ModelParams # parameters determining agents' economic behavior of model
+    equations::Tuple{Vararg{String}} # equilibrium equations in immutable order
+    Params::ModelParams # all model parameters (economic + computational)
+    residuals_fn::F # compiled residuals function: (xMat, params) -> Vector
     policygrid::Vector{Float64} # grid of possible savings positions #TODO: eliminate either policygrid or policymat
     shockmat::Matrix{Float64} # n_a x n_e matrix of shock values
     policymat::Matrix{Float64} # n_a x n_e matrix of savings values
     Π::Matrix{Float64} # transition matrix for the exogenous shock process
+end
+
+
+"""
+    shift_lag(x::AbstractVector, i::Int)
+
+Shifts a time series vector `x` back by `i` periods.
+The first `i` entries are filled with `x[1]` (boundary condition).
+"""
+function shift_lag(x::AbstractVector, i::Int)
+    return vcat(fill(x[1], i), x[1:end-i])
+end
+
+
+"""
+    shift_lead(x::AbstractVector, i::Int)
+
+Shifts a time series vector `x` forward by `i` periods.
+The last `i` entries are filled with `x[end]` (boundary condition).
+"""
+function shift_lead(x::AbstractVector, i::Int)
+    return vcat(x[i+1:end], fill(x[end], i))
 end
 
 # General functions

@@ -39,7 +39,7 @@ function getDirectJacobian(ss::SteadyState, # should be the ending steady state 
     model::SequenceModel)
 
     # Unpack parameters
-    @unpack T, n_v = model.CompParams
+    @unpack T, n_v = model.Params
     n = (T-1) * n_v
     
     # Initialize vectors
@@ -78,7 +78,7 @@ function getIntdJacobians(ss::SteadyState, # should be the ending steady state (
     model::SequenceModel)
 
     # Unpack parameters
-    @unpack T, n_v, n_a, n_e = model.CompParams
+    @unpack T, n_v, n_a, n_e = model.Params
     n = (T-1) * n_v
     nJ = n_a * n_e * (T-1)
     
@@ -128,7 +128,7 @@ function getJacobianHelper(JBI, # jacobian of the backward iteration
     model::SequenceModel)
 
     # Unpack parameters
-    @unpack T, n_v, n_a, n_e = model.CompParams
+    @unpack T, n_v, n_a, n_e = model.Params
     n_r = n_a * n_e
 
     # Obtain helper base 
@@ -163,7 +163,7 @@ function getFinalJacobian(JacobianHelper, # helper Jacobian
     model::SequenceModel)
 
     # Unpack parameters
-    @unpack T, n_v = model.CompParams
+    @unpack T, n_v = model.Params
 
     # Obtain the final Jacobian
     J̅ = [sparse(zeros(n_v, n_v)) for _ in 1:T-1, _ in 1:T-1] # Initialize
@@ -196,7 +196,7 @@ function getConsolidatedJacobian(J̅, # final Jacobian
     model::SequenceModel)
 
     # Unpack parameters
-    @unpack T, n_v = model.CompParams
+    @unpack T, n_v = model.Params
     n = (T-1) * n_v
 
     # Consolidate the Jacobian

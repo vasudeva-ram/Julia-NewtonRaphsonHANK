@@ -9,7 +9,7 @@ function NewtonRaphsonHANK(x_0::Vector{Float64}, # initial guess for x
     precond::Union{SparseMatrixCSC, Nothing}=nothing, # preconditioner for J̅ if available
     ε = 1e-9) # tolerance level
 
-    @unpack T = mod.CompParams
+    @unpack T = mod.Params
     
     x = x_0
     y = x_0

@@ -20,7 +20,7 @@ function ForwardIteration(a_seq, # sequence of T-1 savings policy functions
     ss::SteadyState)
     
     # setting up the Distributions vector
-    @unpack T, n_a, n_e = model.CompParams
+    @unpack T, n_a, n_e = model.Params
     Tv = n_a * n_e
     D = ss.ssD # initial distribution is the starting steady state distribution
     
@@ -48,7 +48,7 @@ function DistributionTransition1(policy, # savings policy function
     model::SequenceModel)
     
     @unpack policygrid, Π = model
-    @unpack n_a, n_e = model.CompParams
+    @unpack n_a, n_e = model.Params
 
     n_m = n_a * n_e
     Jbases = [(ne -1)*n_a for ne in 1:n_e]
@@ -93,7 +93,7 @@ function DistributionTransition2(policy,
     model::SequenceModel)
 
     @unpack policygrid, Π = model
-    @unpack n_a, n_e = model.CompParams
+    @unpack n_a, n_e = model.Params
 
     n_m = n_a * n_e
     Jbases = [(ne - 1) * n_a for ne in 1:n_e]
