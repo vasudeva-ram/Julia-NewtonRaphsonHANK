@@ -32,7 +32,7 @@ function get_SteadyState(model::SequenceModel;
     # find steady state solution (trust region method)
     sol = nlsolve(Fx, x̅)
     x = sol.zero
-
+    
     # Build the steady state policies and distribution
     ssVars = NamedTuple{model.varXs}(x)
     policies = BackwardSteadyState(x, model)

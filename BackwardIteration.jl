@@ -39,23 +39,15 @@ end
 
 
 """
-    BackwardStep(x::Vector{Float64},
-    currentpolicy::Matrix{Float64},
-    model::SequenceModel)
+    ValueFunction(currentpolicy, namedvars, model)
 
-Performs one step of the Endogenous Gridpoint method (Carroll 2006). 
-Note that this step needs to be model specific. This is just the implementation 
-for the Krussell-Smith model. 
-The function takes the current savings policy function and calculates the
+Computes the implied state (endogenous grid) from the current policy function
+using the Euler equation. Maps `currentpolicy` → `impliedstate`.
+Note: this is model-specific (Krusell-Smith).
 """
-function BackwardStep(xVals, # (n_v x 1) vector of endogenous variable values
-    currentpolicy, # current policy function guess
-    model::SequenceModel)
-
-    # Unpack objects
+function ValueFunction(currentpolicy, namedvars, model::SequenceModel)
     @unpack policygrid, shockmat, Π, policymat = model
     @unpack β, γ = model.Params
-    namedvars = NamedTuple{model.varXs}(xVals)
     @unpack r, w = namedvars
 
     # Calculate the consumption matrix
@@ -66,6 +58,30 @@ function BackwardStep(xVals, # (n_v x 1) vector of endogenous variable values
 
     # Interpolate the policy function to the grid
     impliedstate = (1 / (1 + r)) * (cmat - (w .* shockmat) + policymat)
+    return impliedstate
+end
+
+
+"""
+    BackwardStep(x::Vector{Float64},
+    currentpolicy::Matrix{Float64},
+    model::SequenceModel)
+
+Performs one step of the Endogenous Gridpoint method (Carroll 2006).
+Note that this step is model specific, and the model specific elements are defined in 
+the ValueFunction() function.
+The function takes the current savings policy function and calculates the
+policy function of HHs on the savings grid.
+"""
+function BackwardStep(xVals, # (n_v x 1) vector of endogenous variable values
+    currentpolicy, # current policy function guess
+    model::SequenceModel)
+
+    # Unpack objects
+    @unpack policymat = model
+    namedvars = NamedTuple{model.varXs}(xVals)
+
+    impliedstate = ValueFunction(currentpolicy, namedvars, model)
     TF = eltype(currentpolicy)
     griddedpolicy = Matrix{TF}(undef, size(policymat))
 
