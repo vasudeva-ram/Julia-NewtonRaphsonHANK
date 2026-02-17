@@ -6,15 +6,24 @@
 
 
 """
-    BackwardIteration(sv::NamedTuple,
-    model::SequenceModel,
-    end_ss::SteadyState)
+    backward_capital(xVals, current_policy, model::SequenceModel)
 
-Performs one full iteration of the Backward Iteration algorithm. The algorithm
-starts from the steady state at time period T and iterates backwards to time
-period 1. The function returns the sequence of sparse transition matrices
-which will be used in determining the evolution of the distribution in the Forward
-Iteration algorithm.
+User-provided backward function for the KS model's capital aggregation.
+Performs one EGM step to obtain the savings policy at a given time period.
+This is a thin wrapper around BackwardStep.
+"""
+backward_capital(xVals, current_policy, model::SequenceModel) = BackwardStep(xVals, current_policy, model)
+
+
+"""
+    BackwardIteration(xVec, model::SequenceModel, end_ss::SteadyState)
+
+Performs the Backward Iteration algorithm for all aggregated variables.
+For each aggregated variable in `model.agg_vars`, calls its backward function
+to produce a sequence of T-1 disaggregated policy matrices (iterating from T back to 1).
+
+Returns a NamedTuple mapping each aggregated variable name to its policy sequence
+(a Vector of T-1 matrices), e.g., `(KD = [mat1, mat2, ..., mat_{T-1}],)`.
 """
 function BackwardIteration(xVec, # (n_v x T-1) vector of variable values
     model::SequenceModel,
@@ -25,16 +34,22 @@ function BackwardIteration(xVec, # (n_v x T-1) vector of variable values
     TF = eltype(xVec)
     xMat = transpose(reshape(xVec, (model.Params.n_v, T-1))) # make it `T-1 x n_v` matrix
 
-    # Initialize savings vector
-    a_seq = fill(Matrix{TF}(undef, size(end_ss.ssPolicies)), T)
-    a_seq[T] = end_ss.ssPolicies
+    # For each aggregated variable, run its backward function over T-1 periods
+    policy_seqs = map(model.agg_vars) do spec
+        # Initialize with terminal steady state policy
+        # TODO: use spec-specific steady state policy once SteadyState stores multiple policies
+        policies = fill(Matrix{TF}(undef, size(end_ss.ssPolicies)), T)
+        policies[T] = end_ss.ssPolicies
 
-    # Perform backward Iteration
-    for i in 1:T-1
-        a_seq[T-i] = BackwardStep(xMat[T-i,:], a_seq[T+1-i], model)
+        # Iterate backwards from T-1 to 1
+        for i in 1:T-1
+            policies[T-i] = spec.backward(xMat[T-i,:], policies[T+1-i], model)
+        end
+
+        return policies[1:T-1]
     end
-    
-    return vcat([vec(a) for a in a_seq[1:T-1]]...)
+
+    return policy_seqs
 end
 
 

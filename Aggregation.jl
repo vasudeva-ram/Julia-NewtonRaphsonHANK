@@ -46,11 +46,11 @@ end
     Residuals(xMat::AbstractMatrix, model::SequenceModel)
 
 Generic residuals function that evaluates the model's compiled equations
-against the variable matrix `xMat` (n_v × T-1).
+against the variable matrix `xMat` (n_v x T-1).
 
 All variables (endogenous, exogenous, aggregated) should be rows of `xMat`,
 ordered to match `model.varXs`. Returns a vector of residuals ordered as:
-all equations at t=1, all equations at t=2, ... (column-major of k × (T-1)).
+all equations at t=1, all equations at t=2, ... (column-major of k x (T-1)).
 """
 function Residuals(xMat::AbstractMatrix, model::SequenceModel)
     return model.residuals_fn(xMat, model.Params)

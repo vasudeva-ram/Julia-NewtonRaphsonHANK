@@ -48,13 +48,14 @@ function getDirectJacobian(ss::SteadyState, # should be the ending steady state 
     exogZ = ones(T-1)
     JDI = zeros(n, n_v)
 
-    # Obtain steady state a_vec
-    a_vec = repeat(vec(ss.ssPolicies), T-1)
+    # Build steady-state policy sequences (constant across all T-1 periods)
+    ss_policy_seq = fill(ss.ssPolicies, T-1)
+    ss_policy_seqs = NamedTuple{keys(model.agg_vars)}(ntuple(_ -> ss_policy_seq, length(model.agg_vars)))
 
-    # Define backward and forward functions
+    # Define the direct function: fixes policies at steady state, varies only x
     function fullFunc(x_Vec::AbstractVector) # (n_v * T-1)-dimensional vector
-        KD = ForwardIteration(a_vec, model, ss)
-        zVals = Residuals(x_Vec, KD, exogZ, model)
+        xMat = ForwardIteration(x_Vec, ss_policy_seqs, model, ss)
+        zVals = Residuals(xMat, model)
         return zVals
     end
 
@@ -80,26 +81,43 @@ function getIntdJacobians(ss::SteadyState, # should be the ending steady state (
     # Unpack parameters
     @unpack T, n_v, n_a, n_e = model.Params
     n = (T-1) * n_v
-    nJ = n_a * n_e * (T-1)
-    
+    Tv = n_a * n_e
+    n_agg = length(model.agg_vars)
+    nJ = n_agg * Tv * (T-1) # total flat length of all policy sequences
+    policy_size = size(ss.ssPolicies)
+
     # Initialize vectors
     xVec = repeat([values(ss.ssVars)...], T-1) # (n_v * T-1)-dimensional vector
-    a_vec = repeat(vec(ss.ssPolicies), T-1)
+    a_vec = vcat([repeat(vec(ss.ssPolicies), T-1) for _ in 1:n_agg]...)
     idmat = sparse(1.0I, n, n)
-    exogZ = ones(T-1) #TODO: exogZ should be part of the SteadyState object
     JBI = spzeros(nJ, n_v)
     JFI = spzeros(n_v, nJ)
 
-    # Define backward and forward functions
-    function backFunc(x_Vec::AbstractVector) # (n_v * T-1)-dimensional vector
-        a_seq = BackwardIteration(x_Vec, model, ss)
-        return a_seq 
+    # Helper: flatten NamedTuple of policy sequences → flat vector for AD
+    function flatten_policies(policy_seqs::NamedTuple)
+        return vcat([vcat([vec(mat) for mat in seq]...) for seq in values(policy_seqs)]...)
     end
 
-    function forwardFunc(aseq) # (n_a x n_e x T-1) x 1 vector
-        KD = ForwardIteration(aseq, model, ss)
-        zVals = Residuals(xVec, KD, exogZ, model)
-        # zVals = ResidualsSteadyState(xVec, aseq, ss.ssD, model)
+    # Helper: unflatten flat vector → NamedTuple of policy sequences
+    function unflatten_policies(a_flat)
+        n_per_var = Tv * (T-1)
+        seqs = ntuple(n_agg) do k
+            offset = (k-1) * n_per_var
+            [reshape(a_flat[offset + (i-1)*Tv + 1 : offset + i*Tv], policy_size) for i in 1:T-1]
+        end
+        return NamedTuple{keys(model.agg_vars)}(seqs)
+    end
+
+    # Define backward and forward functions (flat vector → flat vector for AD)
+    function backFunc(x_Vec::AbstractVector) # (n_v * T-1)-dimensional vector
+        policy_seqs = BackwardIteration(x_Vec, model, ss)
+        return flatten_policies(policy_seqs)
+    end
+
+    function forwardFunc(a_flat) # flat vector of all policy sequences
+        policy_seqs = unflatten_policies(a_flat)
+        xMat = ForwardIteration(xVec, policy_seqs, model, ss)
+        zVals = Residuals(xMat, model)
         return zVals
     end
 
@@ -112,12 +130,12 @@ function getIntdJacobians(ss::SteadyState, # should be the ending steady state (
 
     # obtain the pullback function
     _, pullback = Zygote.pullback(forwardFunc, a_vec)
-    
+
     # apply reverse mode differentiation
     for i in 1:n_v
         JFI[i,:] = sparse(pullback(idmat[:, n - n_v + i])[1])
     end
-    
+
     return JBI, JFI
 end
 

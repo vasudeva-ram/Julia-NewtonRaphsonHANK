@@ -37,8 +37,9 @@ equilibrium = [
     "KS = KD"
 ]
 
-[AggregatedVariables]
-KD = "agg_capital"
+[AggregatedVariables.KD]
+BackwardFunction = "backward_capital"
+ForwardFunction = "agg_capital"
 
 [ExogenousPaths]
 Z = "ar_process(0.9)"

@@ -1,38 +1,61 @@
 # Description: This file contains the functions that are used to perform the forward iteration
 # algorithm. The algorithm starts from the optimal policy functions of the households and
-# calculates the sequence of aggregate capital demand values, using the evolution of the 
+# calculates the sequence of aggregated variable values, using the evolution of the
 # distribution.
 
-"""
-    ForwardIteration(a_seq, # sequence of T-savings policy functions
-    model::SequenceModel,
-    ss::SteadyState)
 
-Takes the optimal steady-state policy functions of the households and calculates the
-sequence of aggregate capital demand values. There are two steps involved here:
-(1) the function fD: A -> D takes the sequence of policy function and obtains the 
-    sequence of distributions, and
-(2) the function fKD: D -> KD takes the sequence of distributions and obtains the 
-    sequence of aggregate capital demand values.
 """
-function ForwardIteration(a_seq, # sequence of T-1 savings policy functions
-    model::SequenceModel,
-    ss::SteadyState)
-    
-    # setting up the Distributions vector
-    @unpack T, n_a, n_e = model.Params
-    Tv = n_a * n_e
-    D = ss.ssD # initial distribution is the starting steady state distribution
-    
-    # Perform forward iteration and construct KD functionally
-    KD = map(1:T-1) do i
-        a = a_seq[(i-1)*Tv + 1:i*Tv]
+    agg_capital(policy_seq, model::SequenceModel, ss::SteadyState)
+
+User-provided forward/aggregation function for the KS model's capital demand.
+Takes a sequence of T-1 savings policy matrices, evolves the distribution forward
+using `DistributionTransition`, and computes aggregate capital demand at each period
+via `dot(policy, distribution)`.
+
+Returns a Vector of length T-1 with aggregated capital demand values.
+"""
+function agg_capital(policy_seq, model::SequenceModel, ss::SteadyState)
+    D = ss.ssD # initial distribution is the *starting* steady state distribution
+
+    KD = map(1:length(policy_seq)) do i
+        a = vec(policy_seq[i])
         Λ = DistributionTransition(a, model)
         D = Λ * D
         return dot(a, D)
     end
 
     return KD
+end
+
+
+"""
+    ForwardIteration(xVec, policy_seqs::NamedTuple, model::SequenceModel, ss::SteadyState)
+
+Takes the variable vector `xVec` and the NamedTuple of policy sequences from
+`BackwardIteration`, and assembles the full `n_v × (T-1)` matrix needed by `Residuals`.
+
+For each aggregated variable in `model.agg_vars`, calls its forward function
+to compute the aggregated time series and overwrites the corresponding row in `xMat`.
+Non-aggregated variable rows are left as-is from `xVec`.
+
+Returns the completed `n_v × (T-1)` matrix ready for `Residuals(xMat, model)`.
+"""
+function ForwardIteration(xVec, # (n_v x T-1) vector of all variable values
+    policy_seqs::NamedTuple, # output of BackwardIteration
+    model::SequenceModel,
+    ss::SteadyState) # has to be the starting steady state
+
+    @unpack T, n_v = model.Params
+    xMat = reshape(copy(xVec), (n_v, T-1))
+
+    # For each aggregated variable, compute its values and place in the correct row
+    for (varname, spec) in pairs(model.agg_vars)
+        idx = findfirst(==(varname), model.varXs)
+        agg_values = spec.forward(policy_seqs[varname], model, ss)
+        xMat[idx, :] .= agg_values
+    end
+
+    return xMat
 end
 
 

@@ -62,7 +62,8 @@ function test_SteadyState()
     policymat = repeat(policygrid, 1, length(shockgrid)) # making this n_a x n_e matrix
     shockmat = repeat(shockgrid, 1, length(policygrid))' # making this n_a x n_e matrix (note the transpose)
 
-    mod = SequenceModel(varXs, equations, params, residuals_fn, policygrid, shockmat, policymat, Π)
+    agg_vars = (KD = (backward = backward_capital, forward = agg_capital),)
+    mod = SequenceModel(varXs, equations, params, residuals_fn, agg_vars, policygrid, shockmat, policymat, Π)
 
     # Obtain steady state
     ss = get_SteadyState(mod, guess = (Y = 1.0, KS = 1.0, r = 0.02, w = 0.1, Z = 1.0))
@@ -87,11 +88,10 @@ function SingleRun(ss::SteadyState,
     
     # Initialize vectors
     xVec = repeat([values(ss.ssVars)...], T-1)
-    Zexog = ones(T-1)
-    
-    a_seq = BackwardIteration(xVec, model, ss)
-    KD = ForwardIteration(a_seq, model, ss)
-    zVals = Residuals(xVec, KD, Zexog, model)
+
+    policy_seqs = BackwardIteration(xVec, model, ss)
+    xMat = ForwardIteration(xVec, policy_seqs, model, ss)
+    zVals = Residuals(xMat, model)
 
     return zVals
 end
@@ -114,17 +114,17 @@ function directJVPJacobian(mod,
     dirJacobian = spzeros(n, n)
     
     function fullFunction(x_Vec::AbstractVector) # (n_v * T-1)-dimensional vector
-        a_seq = BackwardIteration(x_Vec, mod, stst)
-        KD = ForwardIteration(a_seq, mod, stst)
-        zVals = Residuals(x_Vec, KD, Zexog, mod)
+        policy_seqs = BackwardIteration(x_Vec, mod, stst)
+        xMat = ForwardIteration(x_Vec, policy_seqs, mod, stst)
+        zVals = Residuals(xMat, mod)
         return zVals
     end
-    
+
     for i in 1:n_v
         # dirJacobian[:,n - n_v + i] = JVP(fullFunction, xVec, idmat[:, n - n_v + i])
         dirJacobian[:,i] = JVP(fullFunction, xVec, idmat[:,i])
     end
-    
+
     return dirJacobian
 end
 
@@ -140,19 +140,19 @@ function directNumJacobian(mod,
     dirJacobian = spzeros(n, n)
     
     function fullFunction(x_Vec::AbstractVector) # (n_v * T-1)-dimensional vector
-        a_seq = BackwardIteration(x_Vec, mod, stst)
-        KD = ForwardIteration(a_seq, mod, stst)
-        zVals = Residuals(x_Vec, KD, Zexog, mod)
+        policy_seqs = BackwardIteration(x_Vec, mod, stst)
+        xMat = ForwardIteration(x_Vec, policy_seqs, mod, stst)
+        zVals = Residuals(xMat, mod)
         return zVals
     end
-    
+
     fullX = fullFunction(xVec)
 
     for i in 1:n_v
         xDiff = xVec + (1e-4 * idmat[:,i])
         dirJacobian[:,i] = fullFunction(xDiff) - fullX
     end
-    
+
     return dirJacobian ./ 1e-4
 end
 

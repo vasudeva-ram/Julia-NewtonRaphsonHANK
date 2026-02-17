@@ -28,11 +28,12 @@ struct ModelParams{TF<:Float64}
     ε::TF # convergence/ tolerance criterion
 end
 
-struct SequenceModel{F}
+struct SequenceModel{F, A}
     varXs::Tuple{Vararg{Symbol}} # tuple of all *aggregate* variable names only (exog. + endog.)
     equations::Tuple{Vararg{String}} # equilibrium equations in immutable order
     Params::ModelParams # all model parameters (economic + computational)
     residuals_fn::F # compiled residuals function: (xMat, params) -> Vector
+    agg_vars::A # NamedTuple mapping aggregated var symbols → (backward, forward) function pairs
     policygrid::Vector{Float64} # grid of possible savings positions #TODO: eliminate either policygrid or policymat
     shockmat::Matrix{Float64} # n_a x n_e matrix of shock values
     policymat::Matrix{Float64} # n_a x n_e matrix of savings values

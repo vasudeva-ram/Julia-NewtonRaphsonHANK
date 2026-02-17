@@ -42,9 +42,9 @@ function y_Iteration(J̅::SparseMatrixCSC,
 
     # define full function
     function fullFunction(x_Vec::AbstractVector) # (n_v * T-1)-dimensional vector
-        a_seq = BackwardIteration(x_Vec, mod, stst)
-        KD = ForwardIteration(a_seq, mod, stst)
-        zVals = Residuals(x_Vec, KD, Zexog, mod)
+        policy_seqs = BackwardIteration(x_Vec, mod, stst)
+        xMat = ForwardIteration(x_Vec, policy_seqs, mod, stst)
+        zVals = Residuals(xMat, mod)
         return zVals
     end
     
