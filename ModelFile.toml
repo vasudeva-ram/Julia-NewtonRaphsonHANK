@@ -2,22 +2,29 @@
 # This file demonstrates the finalized TOML structure for HANK solver
 
 [Parameters]
-β = {value = 0.98, description = "Household discount factor"}
-γ = {value = 1.0, description = "Coefficient of relative risk aversion"}
-δ = {value = 0.025, description = "Depreciation rate"}
-α = {value = 0.11, description = "Share of capital in production"}
-ρ = {value = 0.966, description = "Persistence of HH income shock process"}
-σ = {value = 0.283, description = "Std deviation of income shocks"}
+"β" = {value = 0.98, description = "Household discount factor"}
+"γ" = {value = 1.0, description = "Coefficient of relative risk aversion"}
+"δ" = {value = 0.025, description = "Depreciation rate"}
+"α" = {value = 0.11, description = "Share of capital in production"}
 
-[ModelSpecs]
-grid_type = "DoubleExponential"
-shock_discretization = "Rouwenhorst"
-gridx = [0.0, 200.0]
-n_a = 200
-n_e = 7
-T = 150
-ε = 1e-6
-dx = 1e-8
+[ComputationalSpecs]
+T = {value = 150, description = "Number of transition periods"}
+"ε" = {value = 1e-6, description = "Convergence tolerance"}
+dx = {value = 1e-8, description = "Step size for numerical differentiation"}
+
+[Dimensions.wealth]
+type = "endogenous"
+grid_method = "DoubleExponential"
+n = 200
+bounds = [0.0, 200.0]
+
+[Dimensions.productivity]
+type = "exogenous"
+discretization = "Rouwenhorst"
+n = 7
+process = "AR1"
+"ρ" = 0.966
+"σ" = 0.283
 
 [EndogenousVariables]
 Y = "Output"

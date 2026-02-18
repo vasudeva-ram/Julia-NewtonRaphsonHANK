@@ -39,18 +39,18 @@ function getDirectJacobian(ss::SteadyState, # should be the ending steady state 
     model::SequenceModel)
 
     # Unpack parameters
-    @unpack T, n_v = model.Params
+    @unpack T, n_v = model.compspec
     n = (T-1) * n_v
-    
+
     # Initialize vectors
-    xVec = repeat([values(ss.ssVars)...], T-1)
+    xVec = repeat([values(ss.vars)...], T-1)
     idmat = sparse(1.0I, n, n)
     exogZ = ones(T-1)
     JDI = zeros(n, n_v)
 
     # Build steady-state policy sequences (constant across all T-1 periods)
-    ss_policy_seq = fill(ss.ssPolicies, T-1)
-    ss_policy_seqs = NamedTuple{keys(model.agg_vars)}(ntuple(_ -> ss_policy_seq, length(model.agg_vars)))
+    agg_keys = keys(model.agg_vars)
+    ss_policy_seqs = NamedTuple{agg_keys}(ntuple(k -> fill(ss.policies[agg_keys[k]], T-1), length(agg_keys)))
 
     # Define the direct function: fixes policies at steady state, varies only x
     function fullFunc(x_Vec::AbstractVector) # (n_v * T-1)-dimensional vector
@@ -79,16 +79,17 @@ function getIntdJacobians(ss::SteadyState, # should be the ending steady state (
     model::SequenceModel)
 
     # Unpack parameters
-    @unpack T, n_v, n_a, n_e = model.Params
+    @unpack T, n_v = model.compspec
+    @unpack n_a, n_e = model.params
     n = (T-1) * n_v
     Tv = n_a * n_e
     n_agg = length(model.agg_vars)
     nJ = n_agg * Tv * (T-1) # total flat length of all policy sequences
-    policy_size = size(ss.ssPolicies)
+    policy_size = size(first(values(ss.policies)))
 
     # Initialize vectors
-    xVec = repeat([values(ss.ssVars)...], T-1) # (n_v * T-1)-dimensional vector
-    a_vec = vcat([repeat(vec(ss.ssPolicies), T-1) for _ in 1:n_agg]...)
+    xVec = repeat([values(ss.vars)...], T-1) # (n_v * T-1)-dimensional vector
+    a_vec = vcat([repeat(vec(pol), T-1) for pol in values(ss.policies)]...)
     idmat = sparse(1.0I, n, n)
     JBI = spzeros(nJ, n_v)
     JFI = spzeros(n_v, nJ)
@@ -146,10 +147,11 @@ function getJacobianHelper(JBI, # jacobian of the backward iteration
     model::SequenceModel)
 
     # Unpack parameters
-    @unpack T, n_v, n_a, n_e = model.Params
+    @unpack T, n_v = model.compspec
+    @unpack n_a, n_e = model.params
     n_r = n_a * n_e
 
-    # Obtain helper base 
+    # Obtain helper base
     JacobianHelper = [sparse(zeros(n_v, n_v)) for _ in 1:T-1, _ in 1:T-1] # Initialize
     for t in 1:T-1
         for s in 1:T-1
@@ -181,7 +183,7 @@ function getFinalJacobian(JacobianHelper, # helper Jacobian
     model::SequenceModel)
 
     # Unpack parameters
-    @unpack T, n_v = model.Params
+    @unpack T, n_v = model.compspec
 
     # Obtain the final Jacobian
     J̅ = [sparse(zeros(n_v, n_v)) for _ in 1:T-1, _ in 1:T-1] # Initialize
@@ -214,7 +216,7 @@ function getConsolidatedJacobian(J̅, # final Jacobian
     model::SequenceModel)
 
     # Unpack parameters
-    @unpack T, n_v = model.Params
+    @unpack T, n_v = model.compspec
     n = (T-1) * n_v
 
     # Consolidate the Jacobian

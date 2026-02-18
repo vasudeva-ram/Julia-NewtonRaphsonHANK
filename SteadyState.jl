@@ -27,19 +27,20 @@ function get_SteadyState(model::SequenceModel;
     # Initialize steady state guess
     x̅ = isnothing(guess) ? rand(length(model.varNs)) : collect(values(guess))
     tol = 1.0
-    ε = model.Params.ε
+    ε = model.compspec.ε
     
     # find steady state solution (trust region method)
     sol = nlsolve(Fx, x̅)
     x = sol.zero
     
     # Build the steady state policies and distribution
-    ssVars = NamedTuple{model.varXs}(x)
-    policies = BackwardSteadyState(x, model)
-    Λss = DistributionTransition(policies, model)
+    vars = NamedTuple{model.varXs}(x)
+    raw_policies = BackwardSteadyState(x, model)
+    policies = NamedTuple{keys(model.agg_vars)}(ntuple(_ -> raw_policies, length(model.agg_vars)))
+    Λss = DistributionTransition(raw_policies, model)
     dist = invariant_dist(Λss')
 
-    return SteadyState(ssVars, policies, Λss, dist)
+    return SteadyState(vars, policies, Λss, dist)
 end
 
 
@@ -53,17 +54,28 @@ function test_SteadyState()
         "w = (1-α) * Z * KS(-1)^α",
         "KS = KD",
     )
-    sig = 0.5 * sqrt(1 - (0.966^2))
-    params = ModelParams(0.98, 1.0, sig, 0.966, 0.025, 0.11,
-                         0.0001, [0.0, 200.0], 200, 7, length(varXs), 150, 1e-9)
-    residuals_fn = compile_residuals(collect(equations), varXs)
-    policygrid = make_DoubleExponentialGrid(params.gridx[1], params.gridx[2], params.n_a)
-    Π, _, shockgrid = get_RouwenhorstDiscretization(params.n_e, params.ρ, params.σ)
-    policymat = repeat(policygrid, 1, length(shockgrid)) # making this n_a x n_e matrix
-    shockmat = repeat(shockgrid, 1, length(policygrid))' # making this n_a x n_e matrix (note the transpose)
+
+    # Computational specs
+    compspec = ComputationalSpec(150, 1e-9, 0.0001, length(varXs))
+
+    # Economic parameters as NamedTuple
+    params = (β = 0.98, γ = 1.0, δ = 0.025, α = 0.11)
+
+    # Compile equations
+    param_names = Set(keys(params))
+    union!(param_names, Set([:T, :ε, :dx, :n_v]))
+    residuals_fn = compile_residuals(collect(equations), varXs, param_names)
+
+    # Build heterogeneity dimensions
+    wealth_config = Dict("type" => "endogenous", "grid_method" => "DoubleExponential",
+                         "n" => 200, "bounds" => [0.0, 200.0])
+    prod_config = Dict("type" => "exogenous", "discretization" => "Rouwenhorst",
+                       "n" => 7, "ρ" => 0.966, "σ" => 0.283)
+    heterogeneity = (wealth = build_dimension(wealth_config),
+                     productivity = build_dimension(prod_config))
 
     agg_vars = (KD = (backward = backward_capital, forward = agg_capital),)
-    mod = SequenceModel(varXs, equations, params, residuals_fn, agg_vars, policygrid, shockmat, policymat, Π)
+    mod = SequenceModel(varXs, equations, compspec, params, residuals_fn, agg_vars, heterogeneity)
 
     # Obtain steady state
     ss = get_SteadyState(mod, guess = (Y = 1.0, KS = 1.0, r = 0.02, w = 0.1, Z = 1.0))
@@ -83,11 +95,11 @@ function SingleRun(ss::SteadyState,
     model::SequenceModel)
 
     # Unpack parameters
-    @unpack T, n_v = model.Params
+    @unpack T, n_v = model.compspec
     n = (T-1) * n_v
     
     # Initialize vectors
-    xVec = repeat([values(ss.ssVars)...], T-1)
+    xVec = repeat([values(ss.vars)...], T-1)
 
     policy_seqs = BackwardIteration(xVec, model, ss)
     xMat = ForwardIteration(xVec, policy_seqs, model, ss)
@@ -106,10 +118,10 @@ end
 function directJVPJacobian(mod, 
     stst)
 
-    @unpack T, n_v = mod.Params
+    @unpack T, n_v = mod.params
     n = (T - 1) * n_v
     idmat = sparse(1.0I, n, n)
-    xVec = repeat([values(stst.ssVars)...], T-1)
+    xVec = repeat([values(stst.vars)...], T-1)
     Zexog = ones(T-1)
     dirJacobian = spzeros(n, n)
     
@@ -132,10 +144,10 @@ end
 function directNumJacobian(mod, 
     stst)
 
-    @unpack T, n_v = mod.Params
+    @unpack T, n_v = mod.params
     n = (T - 1) * n_v
     idmat = sparse(1.0I, n, n)
-    xVec = repeat([values(stst.ssVars)...], T-1)
+    xVec = repeat([values(stst.vars)...], T-1)
     Zexog = ones(T-1)
     dirJacobian = spzeros(n, n)
     

@@ -17,8 +17,8 @@ function Residuals(xVec, # (n_v x T-1) vector of all endogenous variable values
     model::SequenceModel)
 
     # Unpack parameters
-    @unpack δ, α = model.Params
-    @unpack n_v, T = model.Params
+    @unpack δ, α = model.params
+    @unpack n_v, T = model.compspec
 
     xMat = reshape(xVec, (n_v, T-1)) # reshape to (n_v, T-1) matrix
     namedXvecs = NamedTuple{model.varXs}(Tuple([xMat[i, :] for i in 1:n_v]))
@@ -53,7 +53,7 @@ ordered to match `model.varXs`. Returns a vector of residuals ordered as:
 all equations at t=1, all equations at t=2, ... (column-major of k x (T-1)).
 """
 function Residuals(xMat::AbstractMatrix, model::SequenceModel)
-    return model.residuals_fn(xMat, model.Params)
+    return model.residuals_fn(xMat, model.params)
 end
 
 
@@ -85,7 +85,7 @@ function ResidualsSteadyState(xVals::AbstractVector, # vector of variable values
     Zexog = 1.0
     
     # Unpack parameters
-    @unpack α, δ = model.Params
+    @unpack α, δ = model.params
     
     # Calculate residuals
     residuals = [

@@ -15,7 +15,7 @@ via `dot(policy, distribution)`.
 Returns a Vector of length T-1 with aggregated capital demand values.
 """
 function agg_capital(policy_seq, model::SequenceModel, ss::SteadyState)
-    D = ss.ssD # initial distribution is the *starting* steady state distribution
+    D = ss.D # initial distribution is the *starting* steady state distribution
 
     KD = map(1:length(policy_seq)) do i
         a = vec(policy_seq[i])
@@ -45,7 +45,7 @@ function ForwardIteration(xVec, # (n_v x T-1) vector of all variable values
     model::SequenceModel,
     ss::SteadyState) # has to be the starting steady state
 
-    @unpack T, n_v = model.Params
+    @unpack T, n_v = model.compspec
     xMat = reshape(copy(xVec), (n_v, T-1))
 
     # For each aggregated variable, compute its values and place in the correct row
@@ -71,7 +71,7 @@ function DistributionTransition1(policy, # savings policy function
     model::SequenceModel)
     
     @unpack policygrid, Π = model
-    @unpack n_a, n_e = model.Params
+    @unpack n_a, n_e = model.params
 
     n_m = n_a * n_e
     Jbases = [(ne -1)*n_a for ne in 1:n_e]
@@ -116,7 +116,7 @@ function DistributionTransition2(policy,
     model::SequenceModel)
 
     @unpack policygrid, Π = model
-    @unpack n_a, n_e = model.Params
+    @unpack n_a, n_e = model.params
 
     n_m = n_a * n_e
     Jbases = [(ne - 1) * n_a for ne in 1:n_e]
