@@ -68,13 +68,13 @@ function test_SteadyState()
 
     # Build heterogeneity dimensions
     wealth_config = Dict("type" => "endogenous", "grid_method" => "DoubleExponential",
-                         "n" => 200, "bounds" => [0.0, 200.0])
+                         "n" => 200, "bounds" => [0.0, 200.0], "policy_var" => "KD")
     prod_config = Dict("type" => "exogenous", "discretization" => "Rouwenhorst",
                        "n" => 7, "ρ" => 0.966, "σ" => 0.283)
     heterogeneity = (wealth = build_dimension(wealth_config),
                      productivity = build_dimension(prod_config))
 
-    agg_vars = (KD = (backward = backward_capital, forward = agg_capital),)
+    agg_vars = (KD = (backward = backward_capital, steadystate = steadystate_capital),)
     mod = SequenceModel(varXs, equations, compspec, params, residuals_fn, agg_vars, heterogeneity)
 
     # Obtain steady state

@@ -80,7 +80,7 @@ end
 
 
 """
-    BackwardStep(x::Vector{Float64},
+    backward_capital(x::Vector{Float64},
     currentpolicy::Matrix{Float64},
     model::SequenceModel)
 
@@ -112,29 +112,50 @@ end
 
 
 """
-    BackwardSteadyState(sv::DataFrame,
-    model::SequenceModel)
+    steadystate_capital(xVals, model::SequenceModel)
 
-Applies the Endogenous Gridpoint method to find the steady state policies of 
-the households.
-In essence, performs iteration on `BackwardStep()` until convergence is reached.
+KS-specific steady-state function for the `KD` aggregated variable.
+Iterates `backward_capital` from a zero initial guess until the policy
+function converges (sup-norm < `model.compspec.ε`), holding aggregate
+variable values fixed at `xVals`.
+
+This is the steady-state counterpart to `backward_capital` (one EGM step)
+and `agg_capital` (forward aggregation). It is stored in `agg_vars` under
+the `steadystate` key and called by `get_SteadyState` to obtain the
+household savings policy at the steady state.
+
+Grid dimensions are read from `model.heterogeneity` rather than `model.params`,
+so no `n_a`/`n_e` fields are required in the parameter NamedTuple.
 """
-function BackwardSteadyState(varNs, # supports both Float64 and dual number vectors
-    model::SequenceModel) # has to be the ending steady state (i.e., at time period T)
-
-    # Unpack parameters
+function steadystate_capital(xVals, model::SequenceModel)
     @unpack ε = model.compspec
-    @unpack n_a, n_e = model.params
-    newguess = guess = zeros(n_a, n_e)
+    n_a = model.heterogeneity.wealth.n
+    n_e = model.heterogeneity.productivity.n
+
+    guess    = zeros(n_a, n_e)
+    newguess = zeros(n_a, n_e)
     tol = 1.0
 
-    # Perform backward iteration till convergence
     while ε < tol
-        guess = newguess
-        newguess = BackwardStep(varNs, guess, model)
-        tol = norm(newguess - guess)
+        guess    = newguess
+        newguess = backward_capital(xVals, guess, model)
+        tol      = norm(newguess - guess)
     end
 
     return newguess
+end
+
+
+"""
+    BackwardSteadyState(varNs, model::SequenceModel)
+
+Applies the Endogenous Gridpoint method to find the steady-state policies.
+Iterates `backward_capital` until convergence.
+
+Deprecated: prefer `steadystate_capital`, which reads grid dimensions from
+`model.heterogeneity` and is registered in `model.agg_vars`.
+"""
+function BackwardSteadyState(varNs, model::SequenceModel)
+    return steadystate_capital(varNs, model)
 end
 

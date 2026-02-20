@@ -17,6 +17,7 @@ type = "endogenous"
 grid_method = "DoubleExponential"
 n = 200
 bounds = [0.0, 200.0]
+policy_var = "KD"
 
 [Dimensions.productivity]
 type = "exogenous"
@@ -46,7 +47,7 @@ equilibrium = [
 
 [AggregatedVariables.KD]
 BackwardFunction = "backward_capital"
-ForwardFunction = "agg_capital"
+SteadyStateFunction = "steadystate_capital"
 
 [ExogenousPaths]
 Z = "ar_process(0.9)"

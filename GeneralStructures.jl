@@ -44,12 +44,18 @@ Fields:
 - `grid::Vector{Float64}`: discretized grid values (length `n`)
 - `transition::Union{Matrix{Float64}, Nothing}`: transition matrix (`n × n`) for
    exogenous dimensions; `nothing` for endogenous dimensions
+- `policy_var::Union{Symbol, Nothing}`: for endogenous dimensions, the name of the
+   aggregated variable (in `model.agg_vars`) whose policy matrices are used to
+   construct this dimension's transition matrix via Young's (2010) method.
+   E.g., `:KD` for the wealth dimension in the KS model. `nothing` for exogenous
+   and deterministic dimensions.
 """
 struct HeterogeneityDimension
     dim_type::Symbol
     n::Int
     grid::Vector{Float64}
     transition::Union{Matrix{Float64}, Nothing}
+    policy_var::Union{Symbol, Nothing}
 end
 
 
@@ -89,6 +95,7 @@ function build_dimension(config::Dict{String, Any})
         method = config["grid_method"]
         n = Int(config["n"])
         bounds = config["bounds"]
+        policy_var = haskey(config, "policy_var") ? Symbol(config["policy_var"]) : nothing
 
         if method == "DoubleExponential"
             grid = collect(make_DoubleExponentialGrid(Float64(bounds[1]), Float64(bounds[2]), n))
@@ -98,7 +105,7 @@ function build_dimension(config::Dict{String, Any})
             error("Unknown grid method: $method")
         end
 
-        return HeterogeneityDimension(dim_type, n, grid, nothing)
+        return HeterogeneityDimension(dim_type, n, grid, nothing, policy_var)
 
     elseif dim_type == :exogenous
         disc = config["discretization"]
@@ -108,7 +115,7 @@ function build_dimension(config::Dict{String, Any})
             ρ = Float64(config["ρ"])
             σ = Float64(config["σ"])
             Π, _, z = get_RouwenhorstDiscretization(n, ρ, σ)
-            return HeterogeneityDimension(dim_type, n, z, Π)
+            return HeterogeneityDimension(dim_type, n, z, Π, nothing)
         else
             error("Unknown discretization method: $disc")
         end
@@ -117,7 +124,7 @@ function build_dimension(config::Dict{String, Any})
         n = Int(config["n"])
         bounds = config["bounds"]
         grid = collect(range(Float64(bounds[1]), Float64(bounds[2]), length=n))
-        return HeterogeneityDimension(dim_type, n, grid, nothing)
+        return HeterogeneityDimension(dim_type, n, grid, nothing, nothing)
 
     else
         error("Unknown dimension type: $dim_type")
