@@ -2,100 +2,179 @@
 # Uses a modified Newton-Raphson method with the Moore-Penrose pseudoinverse.
 
 
+
 """
-    get_SteadyState(model::SequenceModel; initial_guess=nothing) -> SteadyState
+    SteadyState
+
+Stores the steady-state solution of the model. Contains the steady-state
+values of all aggregate variables, the household policy functions, the
+transition matrix, and the stationary distribution over household states.
+
+Fields:
+- `vars`: NamedTuple of steady-state variable values, ordered to match
+   `model.varXs` (e.g., `(Y=1.0, KS=3.5, r=0.02, w=0.9, Z=1.0)`)
+- `policies`: NamedTuple of policy matrices, one per aggregated variable,
+   ordered to match `model.agg_vars` (e.g., `(KD = Matrix{Float64},)`)
+- `Λ`: sparse transition matrix for the distribution (from `DistributionTransition`)
+- `D`: stationary distribution vector (length `n_a * n_e`)
+"""
+struct SteadyState
+    vars::NamedTuple
+    policies::NamedTuple
+    Λ::SparseMatrixCSC{Float64,Int64}
+    D::Vector{Float64}
+end
+
+
+"""
+    SSAssembler{M}
+
+Encapsulates the variable-role logic and padded-matrix assembly for the
+steady-state Newton solve. Constructed once per model; callable as a function.
+
+Precomputes the time-invariant exogenous Kronecker factor `Λ_exog` at
+construction so that successive Newton iterations only need to compose it with
+an updated `Λ_endog` — avoiding O(n²) Kronecker products on every call.
+
+## Variable roles
+- **Free** (`free_keys`): `:endogenous` vars NOT listed in `ss_initial.fixed`.
+  These are the Newton search variables — the components of `p_vec`.
+- **Pinned** (`ss_initial.fixed`): exogenous vars and any endogenous vars the
+  user wants held fixed. Assigned with zero ForwardDiff derivatives.
+- **Heterogeneous**: computed from `steadystate_fn → Λ → invariant_dist → dot`.
+
+## Calling convention
+
+    asm(p_vec::AbstractVector) -> Matrix{eltype(p_vec)}
+
+Returns an `n_v × T_pad` padded matrix (all columns identical at SS) suitable
+for the compiled residuals function. Use `get_xVals(asm, p_vec)` to obtain just
+the length-`n_v` vector without tiling.
+"""
+struct SSAssembler{M}
+    model::M
+    all_keys::Tuple{Vararg{Symbol}}
+    free_keys::Tuple{Vararg{Symbol}}
+    n_free::Int
+    Λ_exog::SparseMatrixCSC{Float64, Int}  # time-invariant exogenous Kronecker factor
+    endog_dim::HeterogeneityDimension       # the (single supported) endogenous dimension
+    n_exog::Int                             # total number of exogenous states
+end
+
+"""
+    SSAssembler(model::SequenceModel) -> SSAssembler
+
+Derives variable roles from `ss_initial.fixed` and precomputes `Λ_exog`.
+"""
+function SSAssembler(model::SequenceModel)
+    pin_keys  = keys(model.ss_initial.fixed)
+    all_keys  = var_names(model)
+    free_keys = Tuple(k for k in vars_of_type(model, :endogenous) if !(k in pin_keys))
+
+    endog_dims = [(n, d) for (n, d) in pairs(model.heterogeneity) if d.dim_type == :endogenous]
+    exog_dims  = [(n, d) for (n, d) in pairs(model.heterogeneity) if d.dim_type == :exogenous]
+    length(endog_dims) == 1 ||
+        error("SSAssembler: exactly one endogenous heterogeneity dimension is currently supported")
+    endog_dim = endog_dims[1][2]
+    n_exog    = isempty(exog_dims) ? 1 : prod(d.n for (_, d) in exog_dims)
+
+    # Precompute the time-invariant exogenous Kronecker factor (Float64, model-fixed).
+    # Computed once here; avoids repeating the Kronecker product on every Newton call.
+    Λ_exog = spdiagm(0 => ones(Float64, endog_dim.n))
+    for (_, dim) in exog_dims
+        Λ_exog = kron(sparse(copy((dim.transition::Matrix{Float64})')), Λ_exog)
+    end
+
+    return SSAssembler(model, all_keys, free_keys, length(free_keys),
+                       Λ_exog, endog_dim, n_exog)
+end
+
+
+"""
+    get_xVals(asm::SSAssembler, p_vec::AbstractVector) -> Vector
+
+Returns the full length-`n_v` aggregate variable vector for iterate `p_vec`,
+without tiling to a padded matrix. Useful for extracting final SS values after
+convergence without constructing the full `n_v × T_pad` matrix.
+
+AD-compatible: when `p_vec` carries ForwardDiff dual numbers, derivatives flow
+through the free and heterogeneous rows; pinned rows have zero partials.
+"""
+function get_xVals(asm::SSAssembler, p_vec::AbstractVector)
+    @unpack model, all_keys, free_keys, Λ_exog, endog_dim, n_exog = asm
+    n_v   = model.compspec.n_v
+    T_num = eltype(p_vec)
+    xVals = zeros(T_num, n_v)
+
+    # Free endogenous — carry ForwardDiff partials
+    for (i, k) in enumerate(free_keys)
+        xVals[findfirst(==(k), all_keys)] = p_vec[i]
+    end
+
+    # Pinned variables — Float64 constant, zero partials
+    for (sym, val) in pairs(model.ss_initial.fixed)
+        xVals[findfirst(==(sym), all_keys)] = val
+    end
+
+    # The distribution D is determined by the savings policy of the endogenous dimension.
+    # Compose the precomputed Λ_exog with the updated Λ_endog to get the full transition.
+    # TODO: when multiple endogenous dimensions are supported, compose one Λ_endog per
+    # endogenous dim into a joint transition before computing D.
+    policy_var_name = endog_dim.policy_var
+    policy = model.variables[policy_var_name].steadystate_fn(xVals, model)
+    Λ_endog = make_endogenous_transition(policy, endog_dim, n_exog)
+    D = invariant_dist((Λ_exog * Λ_endog)')
+
+    # Aggregate all heterogeneous variables against the shared distribution D.
+    # Reuse the already-computed policy for policy_var_name to avoid a redundant call.
+    for (varname, var) in pairs(model.variables)
+        var.var_type == :heterogeneous || continue
+        p = (varname === policy_var_name) ? policy : var.steadystate_fn(xVals, model)
+        xVals[findfirst(==(varname), all_keys)] = dot(vec(p), D)
+    end
+
+    return xVals
+end
+
+
+"""
+    (asm::SSAssembler)(p_vec::AbstractVector) -> Matrix
+
+Assembles the padded `n_v × T_pad` matrix from `p_vec`. All columns are
+identical (steady-state convention). The valid-period slice in the compiled
+residuals function returns exactly `n_eq` residuals for one SS period.
+"""
+function (asm::SSAssembler)(p_vec::AbstractVector)
+    @unpack model = asm
+    @unpack n_v, max_lag, max_lead = model.compspec
+    T_pad = 1 + max_lag + max_lead
+    xVals = get_xVals(asm, p_vec)
+    return reshape(repeat(xVals, T_pad), n_v, T_pad)
+end
+
+
+"""
+    get_SteadyState(model::SequenceModel) -> SteadyState
 
 Computes the steady state of the model using a modified Newton-Raphson iteration:
 
     p_{i+1} = p_i - J† z_i
 
-where J† is the Moore-Penrose pseudoinverse (implemented via Julia's `\\` on the
-tall/square Jacobian from ForwardDiff).
-
-## Variable roles at steady state
-
-| Role               | How determined                                      |
-|--------------------|-----------------------------------------------------|
-| `:exogenous`       | Pinned from `model.ss_pin_vals` (TOML `[InitialSteadyState]`) |
-| `:heterogeneous`   | Computed: `steadystate_fn` → policy, then distribution aggregate |
-| `:endogenous` (pinned) | Pinned from `model.ss_pin_vals`                |
-| `:endogenous` (free)   | Newton search variables                        |
-
-The internal function `F : R^{n_free} → R^{n_eq}` assembles the full variable
-vector, evaluates the compiled residuals on an `n_v × 1` matrix (steady-state
-trick: lags/leads collapse to the current value), and returns the residual vector.
-
-`initial_guess` can be a NamedTuple with values for the free endogenous variables,
-e.g. `(Y=1.0, KS=1.0, r=0.02, w=0.1)`. If `nothing`, defaults to `ones(n_free)`.
+where `p` is the vector of free endogenous variables, `z = F(p)` are the
+equilibrium residuals at the steady-state padded matrix, and `J†` is computed
+via Julia's `\\` (least-squares / exact solution for square systems).
+Initial guesses come from `ss_initial.guesses` in the YAML, defaulting to 1.
 """
-function get_SteadyState(model::SequenceModel; initial_guess = nothing)
-    ε   = model.compspec.ε
-    n_v = model.compspec.n_v
+function get_SteadyState(model::SequenceModel)
+    asm  = SSAssembler(model)
+    F(p) = Residuals(asm(p), model)
 
-    # Variables pinned from [InitialSteadyState]: both exogenous and any pinned endogenous
-    pin_keys = keys(model.ss_pin_vals)
+    p = Float64[get(model.ss_initial.guesses, k, 1.0) for k in asm.free_keys]
 
-    # Free endogenous variables: :endogenous vars NOT listed in ss_pin_vals
-    free_keys = Tuple(k for k in vars_of_type(model, :endogenous) if !(k in pin_keys))
-    n_free    = length(free_keys)
-
-    all_keys = var_names(model)   # ordered symbol tuple, matches xMat rows
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # assemble_xMat: builds an (n_v × 1) matrix from the free-variable vector.
-    #
-    # 1. Insert free endogenous values (from Newton iterate p_vec).
-    # 2. Insert pinned values (from model.ss_pin_vals) — zero derivatives.
-    # 3. For each :heterogeneous variable, call its steadystate_fn to get the
-    #    household policy, build the transition matrix, find the stationary
-    #    distribution, and aggregate.
-    # The n_v × 1 output feeds directly into Residuals, exploiting the lag/lead
-    # identity at steady state (shift_lag on a length-1 vector is a no-op).
-    # ─────────────────────────────────────────────────────────────────────────
-    function assemble_xMat(p_vec::AbstractVector)
-        T_num = eltype(p_vec)
-        xVals = zeros(T_num, n_v)
-
-        # Free endogenous variables
-        for (i, k) in enumerate(free_keys)
-            idx = findfirst(==(k), all_keys)
-            xVals[idx] = p_vec[i]
-        end
-
-        # Pinned variables (exogenous + any pinned endogenous); value converted to T_num
-        for (sym, val) in pairs(model.ss_pin_vals)
-            idx = findfirst(==(sym), all_keys)
-            xVals[idx] = val   # implicit convert Float64 → T_num (zero derivatives)
-        end
-
-        # Aggregated (heterogeneous) variables: policy iteration → distribution → dot
-        for (varname, var) in pairs(model.variables)
-            var.var_type == :heterogeneous || continue
-            policy = var.steadystate_fn(xVals, model)
-            Λ      = make_ss_transition(policy, model)
-            D      = invariant_dist(Λ')          # Λ is column-stochastic; pass Λ'
-            idx    = findfirst(==(varname), all_keys)
-            xVals[idx] = dot(vec(policy), D)
-        end
-
-        return reshape(xVals, n_v, 1)
-    end
-
-    # F : R^{n_free} → R^{n_eq}
-    F(p_vec) = Residuals(assemble_xMat(p_vec), model)
-
-    # Initial guess for free endogenous variables
-    p = if isnothing(initial_guess)
-        ones(Float64, n_free)
-    else
-        Float64[initial_guess[k] for k in free_keys]
-    end
-
-    # Modified Newton: p_{i+1} = p_i - J† z_i
-    # J is (n_eq × n_free); J \ z is the least-squares / exact solution.
+    ε        = model.compspec.ε
     z        = F(p)
     iter     = 0
-    max_iter = 1000
+    max_iter = 100
     while norm(z) > ε && iter < max_iter
         J = ForwardDiff.jacobian(F, p)
         p = p .- J \ z
@@ -105,162 +184,135 @@ function get_SteadyState(model::SequenceModel; initial_guess = nothing)
     iter == max_iter &&
         @warn "get_SteadyState: did not converge in $max_iter iterations (residual norm: $(norm(z)))"
 
-    # Build SteadyState from converged values
-    xVals_final = vec(assemble_xMat(p))
-    vars        = NamedTuple{all_keys}(Tuple(Float64.(xVals_final)))
+    # Extract full SS values — get_xVals avoids the wasteful T_pad tiling
+    xVals_ss = Float64.(get_xVals(asm, p))
+    vars     = NamedTuple{asm.all_keys}(Tuple(xVals_ss))
 
-    het_keys = vars_of_type(model, :heterogeneous)
+    # Policy matrices at the SS
+    het_keys      = vars_of_type(model, :heterogeneous)
     policies_list = map(het_keys) do varname
-        model.variables[varname].steadystate_fn(Float64.(xVals_final), model)
+        model.variables[varname].steadystate_fn(xVals_ss, model)
     end
     policies = NamedTuple{het_keys}(Tuple(policies_list))
 
-    # Transition matrix and stationary distribution from the first heterogeneous variable
-    first_policy = policies[het_keys[1]]
-    Λss = make_ss_transition(first_policy, model)
+    # Λss uses the endogenous dimension's policy_var (savings policy drives the distribution).
+    # TODO: when supporting multiple endogenous dimensions, compose multiple Λ_endog matrices
+    # into a joint steady-state transition before computing D.
+    Λ_endog = make_endogenous_transition(
+        policies[asm.endog_dim.policy_var], asm.endog_dim, asm.n_exog)
+    Λss = asm.Λ_exog * Λ_endog
     D   = invariant_dist(Λss')
 
     return SteadyState(vars, policies, Λss, D)
 end
 
 
-# Test Run
+"""
+    test_SteadyState() -> (SequenceModel, SteadyState)
 
+Builds the KS model from YAML and runs `get_SteadyState`. Useful for
+interactive testing of the steady-state solver.
+"""
 function test_SteadyState()
-    # Build variables NamedTuple: endogenous → heterogeneous → exogenous
-    variables = (
-        Y  = Variable(:Y,  :endogenous,    "Output"),
-        KS = Variable(:KS, :endogenous,    "Capital supply"),
-        r  = Variable(:r,  :endogenous,    "Interest rate"),
-        w  = Variable(:w,  :endogenous,    "Wages"),
-        KD = Variable(:KD, :heterogeneous, "Capital demand (aggregated from HH)",
-                      backward_capital, steadystate_capital),
-        Z  = Variable(:Z,  :exogenous,     "Productivity"),
-    )
-
-    equations = (
-        "Y = Z * KS(-1)^α",
-        "r + δ = α * Z * KS(-1)^(α-1)",
-        "w = (1-α) * Z * KS(-1)^α",
-        "KS = KD",
-    )
-
-    # Computational specs
-    compspec = ComputationalSpec(150, 1e-9, 0.0001, length(variables))
-
-    # Economic parameters as NamedTuple
-    params = (β = 0.98, γ = 1.0, δ = 0.025, α = 0.11)
-
-    # Compile equations
-    param_names = Set(keys(params))
-    union!(param_names, Set([:T, :ε, :dx, :n_v]))
-    residuals_fn = compile_residuals(collect(equations), keys(variables), param_names)
-
-    # Build heterogeneity dimensions
-    wealth_config = Dict("type" => "endogenous", "grid_method" => "DoubleExponential",
-                         "n" => 200, "bounds" => [0.0, 200.0], "policy_var" => "KD")
-    prod_config = Dict("type" => "exogenous", "discretization" => "Rouwenhorst",
-                       "n" => 7, "ρ" => 0.966, "σ" => 0.283)
-    heterogeneity = (wealth = build_dimension(wealth_config),
-                     productivity = build_dimension(prod_config))
-
-    # Pinned steady-state values from [InitialSteadyState] (Z is exogenous)
-    ss_pin_vals = (Z = 1.0,)
-
-    mod = SequenceModel(variables, equations, compspec, params, residuals_fn, ss_pin_vals, heterogeneity)
-
-    # Obtain steady state (initial_guess for free endogenous variables only; Z is pinned)
-    ss = get_SteadyState(mod, initial_guess = (Y = 1.0, KS = 1.0, r = 0.02, w = 0.1))
-
+    mod = build_model_from_yaml("KrusellSmith.yaml")
+    ss  = get_SteadyState(mod)
     return mod, ss
 end
 
 
 """
-    SingleRun(ss::SteadyState,
-    model::SequenceModel)
+    SingleRun(ss_initial::SteadyState, ss_ending::SteadyState,
+              model::SequenceModel) -> Vector
 
-Runs the entire sequence of functions for a single run of the model.
-    That is, it calculates the residuals for a given steady state and model.
+Runs the complete forward pass (backward iteration → forward iteration →
+residuals) from the initial steady state, using a constant sequence equal to
+`ss_initial.vars` as the starting guess for all endogenous variables.
+
+Generates exogenous paths via `model.variables[key].seq_fn`, so results are
+stochastic for random exogenous processes.
 """
-function SingleRun(ss::SteadyState,
-    model::SequenceModel)
+function SingleRun(ss_initial::SteadyState,
+                   ss_ending::SteadyState,
+                   model::SequenceModel)
+    @unpack T, n_endog = model.compspec
 
-    # Unpack parameters
-    @unpack T, n_v = model.compspec
-    n = (T-1) * n_v
-    
-    # Initialize vectors
-    xVec = repeat([values(ss.vars)...], T-1)
+    endog_keys  = vars_of_type(model, :endogenous)
+    xVec_endog  = repeat(Float64[ss_initial.vars[k] for k in endog_keys], T - 1)
 
-    policy_seqs = BackwardIteration(xVec, model, ss)
-    xMat = ForwardIteration(xVec, policy_seqs, model, ss)
-    zVals = Residuals(xMat, model)
-
-    return zVals
+    exog_paths  = generate_exog_paths(model, T - 1)
+    policy_seqs = BackwardIteration(xVec_endog, exog_paths, model, ss_ending)
+    agg_seqs    = ForwardIteration(policy_seqs, model, ss_initial)
+    padded_xMat = assemble_full_xMat(xVec_endog, agg_seqs, exog_paths,
+                                     model, ss_initial, ss_ending)
+    return Residuals(padded_xMat, model)
 end
 
 
-function backFunction(x_Vec::AbstractVector) # (n_v * T-1)-dimensional vector
-    a_seq = BackwardIteration(x_Vec, mod, stst)
-    return a_seq 
-end
+"""
+    directJVPJacobian(mod, ss_initial, ss_ending) -> SparseMatrixCSC
 
+Computes the first `n_endog` columns of the sequence-space Jacobian using
+forward-mode JVPs (one JVP per endogenous variable at t=1). Useful for
+debugging and AD validation.
+"""
+function directJVPJacobian(mod, ss_initial, ss_ending)
+    @unpack T, n_endog = mod.compspec
+    n       = n_endog * (T - 1)
+    idmat   = sparse(1.0I, n, n)
 
-function directJVPJacobian(mod, 
-    stst)
+    endog_keys = vars_of_type(mod, :endogenous)
+    xVec_endog = repeat(Float64[ss_initial.vars[k] for k in endog_keys], T - 1)
+    exog_paths = generate_exog_paths(mod, T - 1)
 
-    @unpack T, n_v = mod.compspec
-    n = (T - 1) * n_v
-    idmat = sparse(1.0I, n, n)
-    xVec = repeat([values(stst.vars)...], T-1)
-    Zexog = ones(T-1)
-    dirJacobian = spzeros(n, n)
-    
-    function fullFunction(x_Vec::AbstractVector) # (n_v * T-1)-dimensional vector
-        policy_seqs = BackwardIteration(x_Vec, mod, stst)
-        xMat = ForwardIteration(x_Vec, policy_seqs, mod, stst)
-        zVals = Residuals(xMat, mod)
-        return zVals
+    dirJacobian = spzeros(n_endog * (T - 1), n_endog)
+
+    function fullFunction(x_Vec::AbstractVector)
+        policy_seqs = BackwardIteration(x_Vec, exog_paths, mod, ss_ending)
+        agg_seqs    = ForwardIteration(policy_seqs, mod, ss_initial)
+        padded_xMat = assemble_full_xMat(x_Vec, agg_seqs, exog_paths,
+                                         mod, ss_initial, ss_ending)
+        return Residuals(padded_xMat, mod)
     end
 
-    for i in 1:n_v
-        # dirJacobian[:,n - n_v + i] = JVP(fullFunction, xVec, idmat[:, n - n_v + i])
-        dirJacobian[:,i] = JVP(fullFunction, xVec, idmat[:,i])
+    for i in 1:n_endog
+        dirJacobian[:, i] = JVP(fullFunction, xVec_endog, idmat[:, i])
     end
 
     return dirJacobian
 end
 
 
-function directNumJacobian(mod, 
-    stst)
+"""
+    directNumJacobian(mod, ss_initial, ss_ending) -> SparseMatrixCSC
 
-    @unpack T, n_v = mod.compspec
-    n = (T - 1) * n_v
-    idmat = sparse(1.0I, n, n)
-    xVec = repeat([values(stst.vars)...], T-1)
-    Zexog = ones(T-1)
-    dirJacobian = spzeros(n, n)
-    
-    function fullFunction(x_Vec::AbstractVector) # (n_v * T-1)-dimensional vector
-        policy_seqs = BackwardIteration(x_Vec, mod, stst)
-        xMat = ForwardIteration(x_Vec, policy_seqs, mod, stst)
-        zVals = Residuals(xMat, mod)
-        return zVals
+Computes the first `n_endog` columns of the sequence-space Jacobian via
+finite differences. Useful as a reference for validating `directJVPJacobian`.
+"""
+function directNumJacobian(mod, ss_initial, ss_ending)
+    @unpack T, n_endog = mod.compspec
+    n       = n_endog * (T - 1)
+    idmat   = sparse(1.0I, n, n)
+
+    endog_keys = vars_of_type(mod, :endogenous)
+    xVec_endog = repeat(Float64[ss_initial.vars[k] for k in endog_keys], T - 1)
+    exog_paths = generate_exog_paths(mod, T - 1)
+
+    dirJacobian = spzeros(n, n_endog)
+
+    function fullFunction(x_Vec::AbstractVector)
+        policy_seqs = BackwardIteration(x_Vec, exog_paths, mod, ss_ending)
+        agg_seqs    = ForwardIteration(policy_seqs, mod, ss_initial)
+        padded_xMat = assemble_full_xMat(x_Vec, agg_seqs, exog_paths,
+                                         mod, ss_initial, ss_ending)
+        return Residuals(padded_xMat, mod)
     end
 
-    fullX = fullFunction(xVec)
+    fullX = fullFunction(xVec_endog)
 
-    for i in 1:n_v
-        xDiff = xVec + (1e-4 * idmat[:,i])
-        dirJacobian[:,i] = fullFunction(xDiff) - fullX
+    for i in 1:n_endog
+        xDiff = xVec_endog + (1e-4 * idmat[:, i])
+        dirJacobian[:, i] = fullFunction(xDiff) - fullX
     end
 
     return dirJacobian ./ 1e-4
 end
-
-
-
-
-

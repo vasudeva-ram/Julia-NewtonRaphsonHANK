@@ -4,14 +4,17 @@
 # This file defines the model-agnostic infrastructure for the sequence-space
 # HANK solver. It contains:
 #
-# 1. Heterogeneity dimensions: HeterogeneityDimension struct and build_dimension
-#    factory for constructing grids/transition matrices from TOML config.
-# 2. Model structure: SequenceModel (the complete model specification).
+# 1. Heterogeneity dimensions: HeterogeneityDimension struct.
+# 2. Steady-state specification: SteadyStateSpec struct (fixed values + guesses).
+# 3. Model structure: SequenceModel + Variable (the complete model specification).
 #    Parameters are stored as a NamedTuple (no ModelParams struct).
-# 3. Time-shift operators: shift_lag, shift_lead for lag/lead notation in
+# 4. Out-of-the-box grid functions: double_exponential, rouwenhorst_discretization
+#    (callable by name from YAML model files; wrappers over the primitives below).
+# 5. Sequence-space assembly helpers: generate_exog_paths, assemble_full_xMat.
+# 6. Time-shift operators: shift_lag, shift_lead for lag/lead notation in
 #    compiled equilibrium equations.
-# 4. Grid construction: make_DoubleExponentialGrid, get_RouwenhorstDiscretization.
-# 5. Linear algebra utilities: vectorize_matrices, Vec2Mat, JVP,
+# 7. Grid construction primitives: make_DoubleExponentialGrid, get_RouwenhorstDiscretization.
+# 8. Linear algebra utilities: vectorize_matrices, Vec2Mat, JVP,
 #    RayleighQuotient, approximate_inverse_ilu.
 #
 # Model-specific code (e.g., SteadyState struct, exogenous shock processes)
@@ -24,7 +27,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 using LinearAlgebra, SparseArrays, DataFrames, UnPack, NLsolve, BenchmarkTools, Interpolations
-using Zygote, ForwardDiff, IncompleteLU, IterativeSolvers, TOML
+using Zygote, ForwardDiff, IncompleteLU, IterativeSolvers
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -70,66 +73,21 @@ n_total(heterogeneity::NamedTuple) = prod(d.n for d in values(heterogeneity))
 
 
 """
-    build_dimension(config::Dict{String, Any}) -> HeterogeneityDimension
+    SteadyStateSpec{F, G}
 
-Factory function that constructs a `HeterogeneityDimension` from a TOML config
-dictionary. Dispatches on the `"type"` key:
+Specification for a single steady state of the model. Holds two NamedTuples:
+- `fixed::F`: variables pinned to known values (e.g., exogenous Z = 1.0)
+- `guesses::G`: initial guesses for the free endogenous variables that the
+  Newton-Raphson steady-state solver will search over (e.g., r = 0.08, w = 1.7)
 
-- `"endogenous"`: builds a grid using the method specified in `"grid_method"`
-  (currently supports `"DoubleExponential"` and `"Uniform"`)
-- `"exogenous"`: discretizes a stochastic process using the method specified in
-  `"discretization"` (currently supports `"Rouwenhorst"` for AR(1) processes)
-- `"deterministic"`: builds a uniform grid over `"bounds"`
-
-# Example
-```julia
-config = Dict("type" => "endogenous", "grid_method" => "DoubleExponential",
-              "n" => 200, "bounds" => [0.0, 200.0])
-dim = build_dimension(config)
-```
+Type parameters `F` and `G` capture the exact NamedTuple types so that
+`SequenceModel` can be fully concrete.
 """
-function build_dimension(config::Dict{String, Any})
-    dim_type = Symbol(config["type"])
-
-    if dim_type == :endogenous
-        method = config["grid_method"]
-        n = Int(config["n"])
-        bounds = config["bounds"]
-        policy_var = haskey(config, "policy_var") ? Symbol(config["policy_var"]) : nothing
-
-        if method == "DoubleExponential"
-            grid = collect(make_DoubleExponentialGrid(Float64(bounds[1]), Float64(bounds[2]), n))
-        elseif method == "Uniform"
-            grid = collect(range(Float64(bounds[1]), Float64(bounds[2]), length=n))
-        else
-            error("Unknown grid method: $method")
-        end
-
-        return HeterogeneityDimension(dim_type, n, grid, nothing, policy_var)
-
-    elseif dim_type == :exogenous
-        disc = config["discretization"]
-        n = Int(config["n"])
-
-        if disc == "Rouwenhorst"
-            ρ = Float64(config["ρ"])
-            σ = Float64(config["σ"])
-            Π, _, z = get_RouwenhorstDiscretization(n, ρ, σ)
-            return HeterogeneityDimension(dim_type, n, z, Π, nothing)
-        else
-            error("Unknown discretization method: $disc")
-        end
-
-    elseif dim_type == :deterministic
-        n = Int(config["n"])
-        bounds = config["bounds"]
-        grid = collect(range(Float64(bounds[1]), Float64(bounds[2]), length=n))
-        return HeterogeneityDimension(dim_type, n, grid, nothing, nothing)
-
-    else
-        error("Unknown dimension type: $dim_type")
-    end
+struct SteadyStateSpec{F, G}
+    fixed::F    # NamedTuple of pinned values,      e.g. (Z = 1.0,)
+    guesses::G  # NamedTuple of initial guesses,    e.g. (r = 0.08, w = 1.7)
 end
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -166,22 +124,32 @@ Fields:
 - `steadystate_fn::S`: for `:heterogeneous` variables, the steady-state policy
   iterator `(xVals, model) -> policy_matrix`; `nothing` otherwise
 """
-struct Variable{B, S}
+struct Variable{B, S, Q}
     name::Symbol
     var_type::Symbol
     description::String
-    backward_fn::B
-    steadystate_fn::S
+    backward_fn::B      # for :heterogeneous: EGM step (xVals, policy, model) → policy; else Nothing
+    steadystate_fn::S   # for :heterogeneous: SS iterator (xVals, model) → policy; else Nothing
+    seq_fn::Q           # for :exogenous: path generator (T, ...) → Vector; else Nothing
 end
 
 """
     Variable(name, var_type, description)
 
-Convenience constructor for `:endogenous` and `:exogenous` variables that
-have no associated household functions. Produces `Variable{Nothing, Nothing}`.
+Convenience constructor for `:endogenous` variables with no associated
+functions. Produces `Variable{Nothing, Nothing, Nothing}`.
 """
 Variable(name::Symbol, var_type::Symbol, description::String) =
-    Variable(name, var_type, description, nothing, nothing)
+    Variable(name, var_type, description, nothing, nothing, nothing)
+
+"""
+    Variable(name, var_type, description, backward_fn, steadystate_fn)
+
+Convenience constructor for `:heterogeneous` variables (no seq_fn).
+Produces `Variable{B, S, Nothing}`.
+"""
+Variable(name::Symbol, var_type::Symbol, description::String, backward_fn, steadystate_fn) =
+    Variable(name, var_type, description, backward_fn, steadystate_fn, nothing)
 
 
 """
@@ -211,30 +179,45 @@ solver's discretization of the sequence-space problem and are always present
 regardless of the economic model being solved.
 
 Fields:
-- `T::Int`: number of transition periods (sequence length)
+- `T::Int`: number of transition periods (sequence length); the economy is at
+  `ss_initial` at t=0 and at `ss_ending` at t=T. The Newton search covers the
+  T-1 intermediate periods t=1,...,T-1.
 - `ε::Float64`: convergence tolerance for iterative solvers
 - `dx::Float64`: step size for numerical differentiation
-- `n_v::Int`: number of aggregate variables (derived from `varXs`)
+- `n_v::Int`: total number of aggregate variables across all types
+  (endogenous + heterogeneous + exogenous); equals the number of rows in the
+  full `xMat` passed to the compiled residuals function.
+- `n_endog::Int`: number of `:endogenous` variables only. The Newton search
+  vector has dimension `n_endog × (T-1)`.
+- `max_lag::Int`: maximum lag depth across all compiled equations (e.g. 1 for
+  `KS(-1)`, 3 for `KS(-3)`). The padded xMat prepends `max_lag` copies of the
+  initial SS column so that `shift_lag` always reads the correct boundary.
+- `max_lead::Int`: maximum lead depth across all compiled equations. Appends
+  `max_lead` copies of the ending SS column for `shift_lead` boundary.
 """
 struct ComputationalSpec
     T::Int
     ε::Float64
     dx::Float64
     n_v::Int
+    n_endog::Int
+    max_lag::Int
+    max_lead::Int
 end
 
 
 """
-    SequenceModel{F, H, P, V, C}
+    SequenceModel{F, H, P, V, SI, SE}
 
 Complete specification of a heterogeneous agent model for the sequence-space solver.
 
 Type parameters:
-- `F`: type of the compiled residuals function
-- `H`: type of the heterogeneity NamedTuple
-- `P`: type of the parameters NamedTuple
-- `V`: type of the variables NamedTuple
-- `C`: type of the pinned steady-state values NamedTuple
+- `F`:  type of the compiled residuals function
+- `H`:  type of the heterogeneity NamedTuple
+- `P`:  type of the parameters NamedTuple
+- `V`:  type of the variables NamedTuple
+- `SI`: type of the initial `SteadyStateSpec`
+- `SE`: type of the ending `SteadyStateSpec`
 
 Fields:
 - `variables`: NamedTuple mapping each variable symbol to a `Variable` object,
@@ -245,31 +228,187 @@ Fields:
 - `equations`: equilibrium equation strings in immutable order,
    e.g., `("Y = Z * KS(-1)^α", ...)`
 - `compspec`: `ComputationalSpec` — solver configuration (T, ε, dx, n_v)
-- `params`: NamedTuple of economic parameters (used in equations,
-   e.g., `α`, `β`, `δ`). Constructed dynamically from TOML, so different
-   models can have different parameters without changing any struct definitions.
+- `params`: NamedTuple of economic parameters (e.g., `α`, `β`, `δ`). Constructed
+   dynamically from the YAML file so different models need no struct changes.
 - `residuals_fn`: compiled function `(xMat::AbstractMatrix, params) -> Vector`
    produced by `compile_residuals`
-- `ss_pin_vals`: NamedTuple of steady-state values for pinned variables, parsed from
-   `[InitialSteadyState]` in the TOML. Exogenous variables and any endogenous variables
-   that the user wants to hold fixed at steady state must appear here.
-   E.g., `(Z = 1.0,)` for the KS model.
+- `ss_initial`: `SteadyStateSpec` for the initial steady state — `fixed` holds pinned
+   values (e.g., `Z = 1.0`); `guesses` holds Newton starting values (e.g., `r = 0.08`)
+- `ss_ending`: `SteadyStateSpec` for the ending steady state. Equals `ss_initial` when
+   only one steady state is specified (transitory shock).
 - `heterogeneity`: NamedTuple of `HeterogeneityDimension` objects,
    e.g., `(wealth = HeterogeneityDimension(...), productivity = HeterogeneityDimension(...))`
 """
-struct SequenceModel{F, H, P, V, C}
+struct SequenceModel{F, H, P, V, SI, SE}
     variables::V
     equations::Tuple{Vararg{String}}
     compspec::ComputationalSpec
     params::P
     residuals_fn::F
-    ss_pin_vals::C
+    ss_initial::SI
+    ss_ending::SE
     heterogeneity::H
 end
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Time-shift operators
+# 4. Out-of-the-box grid functions (referenced by name in YAML model files)
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+    double_exponential(; n, grid_min, grid_max) -> Vector{Float64}
+
+Out-of-the-box endogenous grid function for YAML model specifications.
+Constructs a double-exponential asset grid of `n` points on `[grid_min, grid_max]`.
+Thin wrapper over `make_DoubleExponentialGrid`.
+
+Endogenous dimension convention: returns a single `Vector{Float64}`.
+"""
+function double_exponential(; n, grid_min, grid_max)
+    return collect(Float64, make_DoubleExponentialGrid(Float64(grid_min), Float64(grid_max), Int(n)))
+end
+
+
+"""
+    rouwenhorst_discretization(; n, ρ, σ) -> (Vector{Float64}, Matrix{Float64})
+
+Out-of-the-box exogenous grid function for YAML model specifications.
+Discretizes an AR(1) process via Rouwenhorst (1995). Thin wrapper over
+`get_RouwenhorstDiscretization`.
+
+Exogenous dimension convention: returns a **2-tuple `(grid, Π)`** where
+- `grid` is the length-`n` state-space vector (normalized so E[z] = 1)
+- `Π` is the `n × n` row-stochastic transition matrix
+"""
+function rouwenhorst_discretization(; n, ρ, σ)
+    Π, _, z = get_RouwenhorstDiscretization(Int(n), Float64(ρ), Float64(σ))
+    return z, Π   # (grid, transition_matrix) — grid first, matrix second
+end
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. Sequence-space assembly helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+    generate_exog_paths(model::SequenceModel, T::Int) -> NamedTuple
+
+Calls the `seq_fn` of every `:exogenous` variable in `model` to generate a
+length-`T` path for each. Returns a NamedTuple keyed by the exogenous variable
+names, e.g. `(Z = [1.0, 0.98, ...],)`.
+
+`T` should equal `model.compspec.T - 1` (the number of transition periods).
+
+Raises an error for any exogenous variable that lacks a `seq_fn`.
+"""
+function generate_exog_paths(model::SequenceModel, T::Int)
+    exog_keys = vars_of_type(model, :exogenous)
+    paths = map(exog_keys) do key
+        var = model.variables[key]
+        isnothing(var.seq_fn) &&
+            error("Exogenous variable '$key' has no seq_fn. " *
+                  "Specify a seq_function in the YAML.")
+        var.seq_fn(T)
+    end
+    return NamedTuple{exog_keys}(paths)
+end
+
+
+"""
+    assemble_full_xMat(xVec_endog, agg_seqs, exog_paths, model,
+                       ss_start, ss_end) -> Matrix
+
+Assembles the padded `n_v × T_pad` matrix required by the compiled residuals
+function, where `T_pad = (T-1) + max_lag + max_lead`.
+
+## Column layout
+
+| Columns           | Content                                        |
+|-------------------|------------------------------------------------|
+| `1:max_lag`       | Initial SS boundary — all rows = `ss_start.vars` |
+| `max_lag+1:max_lag+T-1` | Transition path (T-1 periods)          |
+| `max_lag+T:T_pad` | Ending SS boundary — all rows = `ss_end.vars`  |
+
+## Row layout (matches `var_names(model)` ordering)
+
+Within the transition columns, rows are filled from three sources:
+- `:endogenous` rows — from `xVec_endog` reshaped to `(n_endog × T-1)`
+- `:heterogeneous` rows — from `agg_seqs[varname][t]` (forward-iteration aggregates)
+- `:exogenous` rows — from `exog_paths[varname][t]`
+
+## AD compatibility
+
+The SS boundary columns are assigned from `Float64` values (with zero
+ForwardDiff partials), so gradients flow only through `xVec_endog` and
+`agg_seqs` (which themselves depend on `xVec_endog`). This is the intended
+behaviour: the solver differentiates with respect to the endogenous sequence,
+not the fixed boundary conditions.
+
+`ss_start` and `ss_end` are expected to have a `.vars::NamedTuple` field
+keyed by `var_names(model)` (satisfied by the `SteadyState` struct).
+"""
+function assemble_full_xMat(xVec_endog::AbstractVector,
+                             agg_seqs::NamedTuple,
+                             exog_paths::NamedTuple,
+                             model::SequenceModel,
+                             ss_start,
+                             ss_end)
+    @unpack T, n_v, n_endog, max_lag, max_lead = model.compspec
+    T_pad = (T - 1) + max_lag + max_lead   # total columns in padded matrix
+
+    TF   = eltype(xVec_endog)
+    xMat = zeros(TF, n_v, T_pad)
+
+    all_keys   = var_names(model)
+    endog_keys = vars_of_type(model, :endogenous)
+    het_keys   = vars_of_type(model, :heterogeneous)
+    exog_keys  = vars_of_type(model, :exogenous)
+
+    # Precompute row indices for each variable group
+    endog_rows = [findfirst(==(k), all_keys) for k in endog_keys]
+    het_rows   = [findfirst(==(k), all_keys) for k in het_keys]
+    exog_rows  = [findfirst(==(k), all_keys) for k in exog_keys]
+
+    # ── Initial SS boundary columns (1:max_lag) ───────────────────────────────
+    # Assigned as Float64 → implicit convert to TF with zero derivatives.
+    for col in 1:max_lag
+        for row in 1:n_v
+            xMat[row, col] = ss_start.vars[all_keys[row]]
+        end
+    end
+
+    # ── Ending SS boundary columns (max_lag+T : T_pad) ────────────────────────
+    for col in (max_lag + T):T_pad
+        for row in 1:n_v
+            xMat[row, col] = ss_end.vars[all_keys[row]]
+        end
+    end
+
+    # ── Transition columns (max_lag+1 : max_lag+T-1) ─────────────────────────
+    xMat_endog = reshape(xVec_endog, n_endog, T - 1)   # n_endog × (T-1)
+
+    for t in 1:T-1
+        col = max_lag + t
+
+        for (j, row) in enumerate(endog_rows)
+            xMat[row, col] = xMat_endog[j, t]
+        end
+
+        for (j, key) in enumerate(het_keys)
+            xMat[het_rows[j], col] = agg_seqs[key][t]
+        end
+
+        for (j, key) in enumerate(exog_keys)
+            xMat[exog_rows[j], col] = exog_paths[key][t]
+        end
+    end
+
+    return xMat
+end
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. Time-shift operators
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
@@ -297,7 +436,7 @@ end
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. Grid construction
+# 7. Grid construction primitives
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
@@ -367,7 +506,7 @@ end
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. Linear algebra utilities
+# 8. Linear algebra utilities
 # ─────────────────────────────────────────────────────────────────────────────
 
 """

@@ -79,67 +79,67 @@ end
 
 
 """
-    ForwardIteration(xVec, policy_seqs::NamedTuple, model::SequenceModel, ss::SteadyState)
+    ForwardIteration(policy_seqs::NamedTuple, model::SequenceModel,
+                     ss_initial) -> NamedTuple
 
-Generic forward iteration: evolves the distribution of agents over all T-1 periods
-and computes the time path of each aggregated variable.
+Generic forward iteration: evolves the distribution of agents over all T-1
+transition periods and aggregates each `:heterogeneous` variable's policy into
+a time series of scalar aggregate values.
+
+## Arguments
+
+- `policy_seqs`: NamedTuple from `BackwardIteration` — maps each heterogeneous
+  variable name to a `Vector{Matrix}` of length T-1.
+- `model`: the `SequenceModel`.
+- `ss_initial`: the starting steady state; must expose `.D::Vector{Float64}`
+  (the initial stationary distribution at `t = 0`).
+
+## Returns
+
+A NamedTuple mapping each `:heterogeneous` variable name to a `Vector` of
+length T-1 containing the sequence of aggregate values, e.g.
+`(KD = [0.32, 0.31, …],)`. These are the "aggregated sequences" consumed by
+`assemble_full_xMat` to fill the heterogeneous rows of the padded xMat.
 
 ## State-space ordering
 
-Dimensions are partitioned by type (preserving `model.heterogeneity` NamedTuple order):
-- Endogenous dims first → **fastest** (inner) indices
-- Exogenous dims after  → **slower** (outer) indices, in NamedTuple order
+Dimensions are partitioned by type (preserving `model.heterogeneity` order):
+- Endogenous dims → **fastest** (inner) indices
+- Exogenous dims  → **slower** (outer) indices, in NamedTuple order
 
-With one endogenous dim (n_a) and K exogenous dims (n_e1, n_e2, …, n_eK):
-
+With one endogenous dim (n_a) and K exogenous dims (n_e1, …, n_eK):
 ```
-state index j = (eK-1)·n_a·n_e1·…·n_e(K-1) + … + (e2-1)·n_a·n_e1 + (e1-1)·n_a + a
-```
-
-Equivalently, using a flattened exogenous index `e_flat` (column-major over e1, …, eK):
-```
-e_flat = (eK-1)·n_e1·…·n_e(K-1) + … + (e2-1)·n_e1 + e1
-j      = (e_flat - 1)·n_a + a
+j = (e_flat - 1)·n_a + a,   e_flat = column-major index over e1,…,eK
 ```
 
-**Policy matrix convention**: `policy_seqs[varname][t]` must be `(n_a × n_exog)` with
-columns indexed by `e_flat` in the same ordering. For a single exogenous dim this is
-just `(n_a × n_e)` with natural column ordering, matching `backward_capital`'s output.
+**Policy matrix convention**: `policy_seqs[varname][t]` must be `(n_a × n_exog)`
+with columns indexed by `e_flat` (matches `backward_capital`'s output for a
+single exogenous dim).
 
 ## Algorithm (per period t)
 
-1. **Endogenous transition** — builds block-diagonal Young's matrix `Λ_endog` of size
-   `(n_a·n_exog) × (n_a·n_exog)` via `make_endogenous_transition`. There are `n_exog`
-   blocks of size `n_a × n_a`, one per flattened exogenous state `e_flat`.
-
-2. **Exogenous transition** `Λ_exog` — prebuilt once (time-invariant) as a nested
-   Kronecker product. Each exogenous dim's row-stochastic Π must be transposed to
-   obtain the column-stochastic factor. Built iteratively: each successive dim wraps
-   around the outside, becoming the next slowest index:
-   ```
-   Λ_exog = kron(Π_eK', kron(…, kron(Π_e1', I_{n_a})))
-   ```
-
+1. **Endogenous transition** — block-diagonal Young's matrix `Λ_endog` of size
+   `(n_a·n_exog)²` via `make_endogenous_transition`.
+2. **Exogenous transition** `Λ_exog` — time-invariant Kronecker product (built
+   once); each exogenous dim's row-stochastic Π is transposed to column-stochastic.
 3. **Composition** — `Λ_t = Λ_exog * Λ_endog`.
-
-4. **Distribution update** — `D = Λ_t * D`, starting from `ss.D`.
-
-5. **Aggregation** — for each `varname` in `model.agg_vars`, writes
-   `dot(vec(policy_t), D)` into the corresponding row of `xMat`. `vec(policy_t)`
-   flattens `(n_a × n_exog)` column-major, matching the state-vector ordering.
-
-Returns the completed `n_v × (T-1)` matrix.
+4. **Distribution update** — `D_t = Λ_t * D_{t-1}`, starting from `ss_initial.D`.
+5. **Aggregation** — `dot(vec(policy_t), D_t)` for each heterogeneous variable.
 
 Note: multiple endogenous dimensions are not yet supported (raises an error).
 Multiple exogenous dimensions are fully supported via the Kronecker composition.
-"""
-function ForwardIteration(xVec,
-    policy_seqs::NamedTuple,
-    model::SequenceModel,
-    ss::SteadyState)
 
-    @unpack T, n_v = model.compspec
-    xMat = reshape(copy(xVec), (n_v, T-1))
+## AD compatibility
+
+When `policy_seqs` carries `ForwardDiff.Dual` element types, `D` is
+initialised from `ss_initial.D` (Float64) but immediately promoted to Dual
+on the first matrix-vector multiply. The element type of `agg_seqs` matches
+the element type of the policy matrices.
+"""
+function ForwardIteration(policy_seqs::NamedTuple,
+                          model::SequenceModel,
+                          ss_initial)
+    @unpack T = model.compspec
 
     # Partition heterogeneity dimensions by type, preserving NamedTuple order.
     endog_dims = [(name, dim) for (name, dim) in pairs(model.heterogeneity)
@@ -147,54 +147,49 @@ function ForwardIteration(xVec,
     exog_dims  = [(name, dim) for (name, dim) in pairs(model.heterogeneity)
                   if dim.dim_type == :exogenous]
 
-    n_endog = prod(d.n for (_, d) in endog_dims)
-    n_exog  = prod(d.n for (_, d) in exog_dims)
+    n_endog_states = prod(d.n for (_, d) in endog_dims)
+    n_exog_states  = prod(d.n for (_, d) in exog_dims)
 
-    # Multiple endogenous dimensions not yet supported
-    if length(endog_dims) != 1
-        error("ForwardIteration: exactly one endogenous dimension is currently supported " *
-              "(got $(length(endog_dims)))")
-    end
+    length(endog_dims) == 1 ||
+        error("ForwardIteration: exactly one endogenous dimension is currently " *
+              "supported (got $(length(endog_dims)))")
     endog_dim = endog_dims[1][2]
 
-    # Build the time-invariant exogenous Kronecker factor.
-    #
-    # State ordering: a is fastest; e1 (first exog in heterogeneity) is next;
-    # eK (last exog) is slowest. Each successive dim wraps around the outside
-    # of the Kronecker product, becoming the next slowest index.
-    #
-    # Π matrices from Rouwenhorst are row-stochastic (Π[e,e'] = P(e→e')).
-    # For D_new = Λ*D_old (column-stochastic convention) we need Π' (transpose).
-    #
+    # Build the time-invariant exogenous Kronecker factor (always Float64).
+    # Π matrices from Rouwenhorst are row-stochastic; transpose → column-stochastic.
     # After the loop: Λ_exog = kron(Π_eK', kron(…, kron(Π_e1', I_{n_a})))
-    Λ_exog = spdiagm(0 => ones(Float64, n_endog))   # start: identity for endog states
+    Λ_exog = spdiagm(0 => ones(Float64, n_endog_states))
     for (_, dim) in exog_dims
-        Π_T = copy((dim.transition::Matrix{Float64})')  # column-stochastic, materialised
-        Λ_exog = kron(sparse(Π_T), Λ_exog)             # new dim becomes outermost (slowest)
+        Π_T    = copy((dim.transition::Matrix{Float64})')
+        Λ_exog = kron(sparse(Π_T), Λ_exog)
     end
 
-    D = ss.D  # initial distribution (starting steady state)
+    het_keys = vars_of_type(model, :heterogeneous)
+
+    # Infer element type from the first policy matrix so the output vector
+    # carries Dual numbers when backward iteration produced them.
+    TF = eltype(policy_seqs[het_keys[1]][1])
+
+    # Initial distribution from starting SS, promoted to TF (zero partials).
+    D = Vector{TF}(ss_initial.D)
+
+    agg_data = [Vector{TF}(undef, T - 1) for _ in het_keys]
 
     for t in 1:T-1
-        # Endogenous Young's transition for this period.
-        # policy_seqs[endog_dim.policy_var][t] is (n_a × n_exog), columns indexed
-        # by e_flat = (eK-1)·n_e1·…·n_e(K-1) + … + e1 (matching Λ_exog ordering).
+        # Endogenous Young's transition for period t
         Λ_endog = make_endogenous_transition(policy_seqs[endog_dim.policy_var][t],
-                                             endog_dim, n_exog)
+                                             endog_dim, n_exog_states)
 
-        # Compose full transition and evolve distribution
+        # Evolve distribution
         D = Λ_exog * Λ_endog * D
 
-        # Aggregate: dot(vec(policy_t), D) where vec flattens (n_a × n_exog)
-        # column-major — matching state index j = (e_flat-1)*n_a + a.
-        for (varname, var) in pairs(model.variables)
-            var.var_type == :heterogeneous || continue
-            idx = findfirst(==(varname), var_names(model))
-            xMat[idx, t] = dot(vec(policy_seqs[varname][t]), D)
+        # Aggregate each heterogeneous variable: E_D[policy_t]
+        for (j, varname) in enumerate(het_keys)
+            agg_data[j][t] = dot(vec(policy_seqs[varname][t]), D)
         end
     end
 
-    return xMat
+    return NamedTuple{het_keys}(Tuple(agg_data))
 end
 
 

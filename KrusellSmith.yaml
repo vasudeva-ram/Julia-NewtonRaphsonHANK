@@ -1,0 +1,106 @@
+# YAML configuration for the Krusell-Smith model. The instructions are for Claude Code to read and understand how to change the current way the model is specified in the code, to this new way of specifying the model in a YAML file. 
+
+# The first section is meta info: just the name for the model file, and the name ofthe associated function file.
+# The associated function file should be in the same directory as this YAML file, and should contain the functions specified in the equations and variables sections below. These include the functions for the exogenous process, the backward iteration and the steady state calculation for the heterogeneous variable, and the functions which will return the grids for the dimensions. The function file should be written in Julia, and should be included by default before the model is set up and solved.
+file:
+  name: "Krusell Smith Model"
+  function_file: "KrusellSmith.jl"
+
+# The parameters section defines the parameters of the model, both economic and computational. Each parameter has a name, a value, and a description. The economic parameters are those that define the preferences and technology of the model, while the computational parameters are those that control the numerical solution of the model. As is currently the case, the computational parameters are optional for the user to specify. If they're not specified, the model will use default values for them. 
+parameters:
+  model:
+    - name: "β"
+      value: 0.98
+      description: "Household discount factor"
+    - name: "γ"
+      value: 1.0
+      description: "Coefficient of relative risk aversion"
+    - name: "α"
+      value: 0.36
+      description: "Capital share in production"
+    - name: "δ"
+      value: 0.08
+      description: "Depreciation rate"
+
+  computational:
+    - name: "T"
+      value: 150
+      description: "Number of transition periods"
+    - name: "ε"
+      value: 1.0e-6
+      description: "Convergence tolerance"
+    - name: "dx"
+      value: 0.001
+      description: "Step size for numerical derivatives"
+
+# The dimensions section defines the dimensions along which the model is heterogeneous. Each dimension has a name, a type (endogenous or exogenous), a function that performs discretization for that dimension, and a list of params needed by that function. 
+# The grid_function specifies the method used to create the grid for that dimension, and the params specify the parameters needed for that method. This function should be supplied by the user and should be present in the function file. Some grid_functions are provided out-of-the-box, like the `rouwenhorst_discretization` function and the `double_exponential` function. In addition to specifying the function, the user should also provide the necessary parameters for that function. For example, for the `double_exponential` function, the user should specify the number of grid points (n), the minimum and maximum values of the grid (grid_min and grid_max). For the `rouwenhorst_discretization` function, the user should specify the number of grid points (n), the persistence parameter (ρ) and the standard deviation of the shocks (σ). #TODO: we need to create functions double_exponential and rouwenhorst_discretization, which would be wrappers on the current functions we have. The model setup function should pass these parameters to the functions when creating the grids for the dimensions.
+# When the dimension type is exogenous, the function *should* return 2 objects - the grid for that dimension, and the transition matrix for that dimension - in that order. When the dimension type is endogenous, the function should return just the grid for that dimension. The model setup function should be able to handle both cases. We should also have some error handling in place to check that the functions are returning the correct number of objects and the correct *type* of object based on the dimension type.
+# As before, the endogenous dimension type should specify the name of the aggregated policy variable it is associated with.
+dimensions:
+  - name: "wealth"
+    type: "endogenous"
+    policy_var: "KD"
+    grid_function: "double_exponential"
+    params:
+      n: 200
+      grid_min: 0.0
+      grid_max: 200.0
+
+  - name: "productivity"
+    type: "exogenous"
+    grid_function: "rouwenhorst_discretization"
+    params:
+      n: 7
+      ρ: 0.966
+      σ: 0.283
+
+# Variables are of 3 possible types: endogenous, exogenous and heterogenous (what we previously called "AggregatedVariables"). Each variable has a name and an optional description. Endogenous variables require no additional information from the user. For exogenous variables, the user needs to specify the function that governs the exogenous process for that variable. This function should be present in the function file. This function should return a vector of type `Float64` and size `T` where `T` is taken from the computational parameters section. Error handling should be in place to check that the function is returning the correct size and type of object.
+
+#For heterogeneous variables, the user needs to specify the backward function and the steady state function for that variable as is the case currently. The backward function is used to perform the backward iteration for that variable, while the steady state function is used to calculate the steady state value for that variable. Both of these functions should also be present in the function file. 
+
+variables:
+  endogenous:
+    - name: "Y"
+      description: "Output"
+    - name: "KS"
+      description: "Capital supply"
+    - name: "r"
+      description: "Interest rate"
+    - name: "w"
+      description: "Wages"
+
+  exogenous:
+    - name: "Z"
+      description: "Productivity"
+      seq_function: "exogenousZ"
+
+  heterogeneous:
+    - name: "KD"
+      description: "Capital demand (aggregated from HH)"
+      backward_function: "backward_capital"
+      ss_function: "steadystate_capital"
+
+# Equations are as before; just strings that represent the equations of the model. The model setup function should be able to parse these equations and use them to set up the model for solution. 
+equations:
+  - "Y = Z * KS(-1)^α"
+  - "r + δ = α * Z * KS(-1)^(α-1)"
+  - "w = (1-α) * Z * KS(-1)^α"
+  - "KS = KD"
+
+# Finally, we specify steady states. We should have at least one steady state and a maximum of two steady states for right now. The first steady state is the initial steady state, which is the steady state that the model starts in at the beginning of the transition. The second steady state is the ending steady state, which is the steady state that the model converges to at the end of the transition. If only one steady state is provided, the model should assume that the economy starts and ends at the same steady state - so its a transitory shock. 
+# For each steady state, we specify which variables are fixed and which variables are guessed. The fixed variables are those that are held constant at their specified values in that steady state, while the guessed variables are those that are allowed to vary and are solved for in order to find the steady state. The model setup function should be able to use this information to set up the steady state calculation for each of these steady states.
+steady_states:
+  initial:
+    fixed:
+      Z: 1.0
+    guesses:
+      r: 0.08
+      w: 1.7
+
+  ending:
+    fixed:
+      Z: 2.0
+    guesses:
+      r: 0.05
+      w: 2.3

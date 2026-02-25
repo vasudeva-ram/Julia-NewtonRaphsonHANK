@@ -13,29 +13,6 @@
 
 
 """
-    SteadyState
-
-Stores the steady-state solution of the model. Contains the steady-state
-values of all aggregate variables, the household policy functions, the
-transition matrix, and the stationary distribution over household states.
-
-Fields:
-- `vars`: NamedTuple of steady-state variable values, ordered to match
-   `model.varXs` (e.g., `(Y=1.0, KS=3.5, r=0.02, w=0.9, Z=1.0)`)
-- `policies`: NamedTuple of policy matrices, one per aggregated variable,
-   ordered to match `model.agg_vars` (e.g., `(KD = Matrix{Float64},)`)
-- `Λ`: sparse transition matrix for the distribution (from `DistributionTransition`)
-- `D`: stationary distribution vector (length `n_a * n_e`)
-"""
-struct SteadyState
-    vars::NamedTuple
-    policies::NamedTuple
-    Λ::SparseMatrixCSC{Float64,Int64}
-    D::Vector{Float64}
-end
-
-
-"""
     exogenousZ!(namedXvars::NamedTuple, model::SequenceModel)
 
 Simulates one step of an AR(1) process for the aggregate productivity shock Z.
@@ -56,55 +33,88 @@ end
 
 
 """
+    exogenousZ(T::Int; ρ::Float64 = 0.9, σ::Float64 = 0.1) -> Vector{Float64}
+
+Generates a T-period path for aggregate productivity Z starting from the
+steady state (Z₀ = 1.0) via an AR(1) process:
+
+    Z_t = ρ · Z_{t-1} + σ · √(1-ρ²) · ε_t,   ε_t ~ N(0,1)
+
+Returns a Vector of length T.
+"""
+function exogenousZ(T::Int; ρ::Float64 = 0.9, σ::Float64 = 0.1)
+    Z = ones(T)
+    for t in 2:T
+        Z[t] = ρ * Z[t-1] + σ * sqrt(1 - ρ^2) * randn()
+    end
+    return Z
+end
+
+
+"""
     ValueFunction(currentpolicy, namedvars, model)
 
 Computes the implied state (endogenous grid) from the current policy function
 using the Euler equation. Maps `currentpolicy` → `impliedstate`.
 Note: this is model-specific (Krusell-Smith).
+
+Grid objects are read from `model.heterogeneity` at call time, so no
+pre-built matrices are stored on the model struct.
 """
 function ValueFunction(currentpolicy, namedvars, model::SequenceModel)
-    @unpack policygrid, shockmat, Π, policymat = model
+    n_a       = model.heterogeneity.wealth.n
+    n_e       = model.heterogeneity.productivity.n
+    grid      = model.heterogeneity.wealth.grid
+    prod_grid = model.heterogeneity.productivity.grid
+    Π         = model.heterogeneity.productivity.transition
+    policymat = repeat(grid, 1, n_e)          # n_a × n_e; each col = wealth grid
+    shockmat  = repeat(prod_grid', n_a, 1)    # n_a × n_e; each row = productivity grid
+
     @unpack β, γ = model.params
     @unpack r, w = namedvars
 
     # Calculate the consumption matrix
     cprimemat = ((1 + r) .* policymat) + (w .* shockmat) - currentpolicy
-    exponent = -1 * γ
-    eulerlhs = β * (1 + r) * ((cprimemat .^ exponent) * Π')
-    cmat = eulerlhs .^ (1 / exponent)
+    exponent  = -1 * γ
+    eulerlhs  = β * (1 + r) * ((cprimemat .^ exponent) * Π')
+    cmat      = eulerlhs .^ (1 / exponent)
 
-    # Interpolate the policy function to the grid
+    # Endogenous grid: implied current wealth that rationalises currentpolicy
     impliedstate = (1 / (1 + r)) * (cmat - (w .* shockmat) + policymat)
     return impliedstate
 end
 
 
 """
-    backward_capital(x::Vector{Float64},
-    currentpolicy::Matrix{Float64},
-    model::SequenceModel)
+    backward_capital(xVals, currentpolicy, model::SequenceModel)
 
 Performs one step of the Endogenous Gridpoint method (Carroll 2006).
-Note that this step is model specific, and the model specific elements are defined in 
-the ValueFunction() function.
-The function takes the current savings policy function and calculates the
-policy function of HHs on the savings grid.
+`xVals` is a length-`n_v` vector of all aggregate variable values at the
+current time step (must include at least `:r` and `:w`). `currentpolicy` is
+the next-period savings policy matrix (n_a × n_e).
+
+Returns the savings policy matrix on the wealth grid for the current period.
+
+Note: this step is model-specific; the EGM core is in `ValueFunction`.
 """
-function backward_capital(xVals, # (n_v x 1) vector of endogenous variable values
-    currentpolicy, # current policy function guess
-    model::SequenceModel)
+function backward_capital(xVals,           # length-n_v vector of variable values at time t
+                          currentpolicy,   # next-period policy matrix (n_a × n_e)
+                          model::SequenceModel)
+    n_e  = model.heterogeneity.productivity.n
+    grid = model.heterogeneity.wealth.grid
 
-    # Unpack objects
-    @unpack policymat = model
-    namedvars = NamedTuple{model.varXs}(xVals)
+    namedvars = NamedTuple{var_names(model)}(Tuple(xVals))
 
-    impliedstate = ValueFunction(currentpolicy, namedvars, model)
-    TF = eltype(currentpolicy)
+    impliedstate  = ValueFunction(currentpolicy, namedvars, model)
+    TF            = eltype(currentpolicy)
+    policymat     = repeat(grid, 1, n_e)
     griddedpolicy = Matrix{TF}(undef, size(policymat))
 
-    for i in 1:model.params.n_e
-        linpolate = extrapolate(interpolate((impliedstate[:,i],), policymat[:,i], Gridded(Linear())), Flat())
-        griddedpolicy[:,i] = linpolate.(policymat[:,i])
+    for i in 1:n_e
+        linpolate = extrapolate(
+            interpolate((impliedstate[:, i],), policymat[:, i], Gridded(Linear())),
+            Flat())
+        griddedpolicy[:, i] = linpolate.(policymat[:, i])
     end
 
     return griddedpolicy

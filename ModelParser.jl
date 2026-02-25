@@ -1,61 +1,29 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# ModelParser.jl — TOML parsing, equation compilation, and model construction
+# ModelParser.jl — YAML parsing, equation compilation, and model construction
 #
 # This file handles the translation from user-facing model specification
-# (ModelFile.toml) to the internal Julia representation (SequenceModel).
-# It contains three layers:
+# (a .yaml file) to the internal Julia representation (SequenceModel).
+# It contains two layers:
 #
-# 1. TOML utilities: ParseTOML, DictToNamedTuple — generic helpers for
-#    reading TOML files into Julia data structures.
-#
-# 2. Equation compilation: transform_expr, compile_residuals — a
+# 1. Equation compilation: transform_expr, compile_residuals — a
 #    metaprogramming system that converts string equations like
 #    "Y = Z * KS(-1)^α" into compiled Julia functions that operate on
 #    the n_v × (T-1) variable matrix. This is done at model construction
 #    time via `eval`, so the resulting function is regular Julia code that
 #    is fully compatible with automatic differentiation (ForwardDiff, Zygote).
 #
-# 3. Model construction: build_model_from_toml — the main entry point that
-#    reads a TOML file, builds heterogeneity dimensions, compiles equations,
-#    and returns a complete SequenceModel ready for solving.
+# 2. Model construction: build_model_from_yaml — the main entry point that
+#    reads a YAML file, auto-includes the model's function file, builds
+#    heterogeneity dimensions by calling user-specified (or built-in) grid
+#    functions, compiles equations, and returns a complete SequenceModel.
 #
-# Legacy functions (SplitExpressions, ParseExpressions) have been removed.
-# They are superseded by the equation compilation system.
+# Grid function contract (enforced with descriptive errors):
+#   - endogenous dimension: fn(; params...) → Vector{Float64} of length n
+#   - exogenous dimension:  fn(; params...) → (Vector{Float64}, Matrix{Float64})
+#                           i.e. (grid of length n, n×n transition matrix)
 # ─────────────────────────────────────────────────────────────────────────────
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TOML utilities
-# ─────────────────────────────────────────────────────────────────────────────
-
-"""
-    ParseTOML(file_path::String) -> Dict{String, NamedTuple}
-
-Parses a TOML file and converts each top-level section into a NamedTuple.
-Returns a dictionary mapping section names (strings) to NamedTuples.
-
-Note: This is a generic utility. For full model construction from TOML,
-use `build_model_from_toml` instead.
-"""
-function ParseTOML(file_path::String)
-    toml_data = TOML.parsefile(file_path)
-    for (key, value) in toml_data
-        toml_data[key] = DictToNamedTuple(value)
-    end
-    return toml_data
-end
-
-
-"""
-    DictToNamedTuple(dict::Dict{String, Any}) -> NamedTuple
-
-Converts a `Dict{String, Any}` into a NamedTuple with Symbol keys.
-Used internally by `ParseTOML` to make TOML sections accessible via
-dot syntax (e.g., `section.fieldname`).
-"""
-function DictToNamedTuple(dict::Dict{String, Any})
-    return NamedTuple{Tuple(Symbol(k) for k in keys(dict))}(values(dict))
-end
+using YAML
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -152,6 +120,59 @@ end
 
 
 """
+    detect_max_lag_lead(equations::Vector{String},
+                        var_syms) -> (max_lag::Int, max_lead::Int)
+
+Walks the ASTs of all `equations` and returns the maximum lag depth and the
+maximum lead depth found across every variable reference.
+
+For example, given `"Y = Z * KS(-1)^α"` the function returns `(1, 0)` since
+the deepest lag is 1 and there are no leads. For `"C(+2) = r(-3) * Y"` it
+would return `(3, 2)`.
+
+These values determine how many boundary-condition columns must be prepended
+(initial SS, depth `max_lag`) and appended (ending SS, depth `max_lead`) to
+the padded xMat passed to the compiled residuals function.
+"""
+function detect_max_lag_lead(equations::Vector{String}, var_syms)
+    var_set  = Set(var_syms)
+    max_lag  = Ref(0)
+    max_lead = Ref(0)
+
+    function walk(expr)
+        expr isa Expr || return
+        if expr.head == :call
+            func = expr.args[1]
+            # VAR(±i) pattern: Expr(:call, :VAR, lag_integer)
+            if func isa Symbol && func in var_set &&
+               length(expr.args) == 2 && expr.args[2] isa Integer
+                lag_val = expr.args[2]
+                if lag_val < 0
+                    max_lag[]  = max(max_lag[],  abs(lag_val))
+                elseif lag_val > 0
+                    max_lead[] = max(max_lead[], lag_val)
+                end
+                return  # no need to recurse into a terminal lag/lead node
+            end
+        end
+        for a in expr.args
+            walk(a)
+        end
+    end
+
+    for eq_str in equations
+        parts = split(eq_str, "="; limit=2)
+        length(parts) == 2 || continue
+        for part in parts
+            walk(Meta.parse(strip(String(part))))
+        end
+    end
+
+    return max_lag[], max_lead[]
+end
+
+
+"""
     compile_residuals(equations::Vector{String}, var_syms::Tuple{Vararg{Symbol}},
                       param_names::Set{Symbol})
 
@@ -162,10 +183,25 @@ Each equation has the form `"LHS = RHS"`. The residual for each equation
 is `LHS .- RHS`, evaluated element-wise over the time dimension (columns
 of `xMat`).
 
-The compilation pipeline:
+## Padded-matrix convention
+
+The compiled function expects `xMat` to have `T_pad = (T-1) + max_lag + max_lead`
+columns, where the first `max_lag` columns are initial-SS boundary values and
+the last `max_lead` columns are ending-SS boundary values. The function
+computes residuals over all `T_pad` columns, then slices to the valid middle
+range `(max_lag+1):(T_pad - max_lead)`, returning exactly `n_eq × (T-1)`
+values. This ensures that `shift_lag` and `shift_lead` always read the correct
+steady-state boundary rather than an arbitrary transition value.
+
+`max_lag` and `max_lead` are detected automatically from the equation ASTs via
+`detect_max_lag_lead` and are baked into the compiled function as closure
+constants — the caller only needs to pass a correctly sized padded `xMat`.
+
+## Compilation pipeline
 1. Parse each equation string into a Julia AST via `Meta.parse`
 2. Transform the AST via `transform_expr` (variable → row slice, params → field access, etc.)
-3. Assemble all transformed equations into a single anonymous function body
+3. Assemble all transformed equations + the valid-range slice into a single
+   anonymous function body
 4. `eval` the function at construction time → returns a regular Julia function
 
 The resulting function is ordinary compiled Julia code (no runtime `eval`),
@@ -176,11 +212,15 @@ or `keys(model.variables)` to get the ordered symbol tuple from a built model).
 Parameters are identified by matching against the explicitly provided `param_names`.
 
 The output vector is ordered: all equations at t=1, all equations at t=2, ...
-(column-major vectorization of a k × (T-1) residual matrix).
+(column-major vectorization of a k × (T-1) residual matrix, after slicing).
 """
 function compile_residuals(equations::Vector{String}, var_syms::Tuple{Vararg{Symbol}},
                            param_names::Set{Symbol})
     var_indices = Dict(sym => i for (i, sym) in enumerate(var_syms))
+
+    # Detect lag/lead depths and bake as closure constants
+    max_lag, max_lead = detect_max_lag_lead(equations, var_syms)
+    slice_lo = max_lag + 1          # first valid column index (1-based)
 
     # Generate a unique symbol for each equation's residual
     residual_syms = [Symbol("_r_", i) for i in 1:length(equations)]
@@ -200,12 +240,13 @@ function compile_residuals(equations::Vector{String}, var_syms::Tuple{Vararg{Sym
         lhs_transformed = transform_expr(lhs_parsed, var_indices, param_names)
         rhs_transformed = transform_expr(rhs_parsed, var_indices, param_names)
 
-        # _r_i = LHS .- RHS
+        # _r_i = LHS .- RHS  (over all T_pad columns)
         push!(body_exprs, :($(residual_syms[i]) = $(Expr(:call, :.-, lhs_transformed, rhs_transformed))))
     end
 
-    # Stack residuals: transpose each into a row, vcat into k×(T-1) matrix, then vec
-    trans_exprs = [:($(s)') for s in residual_syms]
+    # Slice each residual to the valid middle range, then stack column-major.
+    # slice_lo and max_lead are closure constants baked in at compile time.
+    trans_exprs = [:($(s)[$slice_lo:(size(xMat, 2) - $max_lead)]') for s in residual_syms]
     push!(body_exprs, :(return vec(reduce(vcat, [$(trans_exprs...)]))))
 
     fn_body = Expr(:block, body_exprs...)
@@ -219,119 +260,243 @@ end
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Full model construction from TOML
+# Full model construction from YAML
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
-    build_model_from_toml(file_path::String, agg_fns) -> SequenceModel
+    build_model_from_yaml(file_path::String) -> SequenceModel
 
-Constructs a complete `SequenceModel` from a TOML specification file.
+Constructs a complete `SequenceModel` from a YAML specification file.
 
-Reads all sections of the TOML and performs the following steps:
-1. Builds heterogeneity dimensions from `[Dimensions.*]` sections via `build_dimension`
-2. Constructs `Variable` objects from `[EndogenousVariables]`, `[AggregatedVariables]`,
-   and `[ExogenousVariables]` sections, in that order (determining row order in `xMat`)
-3. Builds `ComputationalSpec` from `[ComputationalSpecs]` section (T, ε, dx).
-   If the section or individual fields are missing, defaults are used
-   (T=150, ε=1e-6, dx=1e-8) and a message is printed.
-4. Constructs a `params` NamedTuple from `[Parameters]` (economic params only)
-5. Compiles equilibrium equations from `[Equations]` via `compile_residuals`
-6. Assembles everything into a `SequenceModel`
-
-`agg_fns` must be provided by the caller as a NamedTuple of
-`(backward=fn, steadystate=fn)` pairs, since Julia functions cannot be
-referenced by name in TOML. The TOML `[AggregatedVariables]` section
-documents which function names are expected; the actual function objects
-must be passed here.
-
-Variable ordering in `model.variables` (and hence row ordering of `xMat`):
-  endogenous (:endogenous) → heterogeneous (:heterogeneous) → exogenous (:exogenous)
+Steps performed:
+1. Parse the YAML file.
+2. `include` the model's `function_file` (e.g. `ks_model_functions.jl`), making
+   all model-specific Julia functions available by name.
+3. Build heterogeneity dimensions by calling each dimension's `grid_function`
+   with the `params` dict as keyword arguments. Return values are validated:
+   - endogenous: must return a `Vector` of length `n`
+   - exogenous:  must return a 2-tuple `(grid::Vector, Π::Matrix)`, both of
+                 size consistent with `n`
+4. Build `Variable` objects (endogenous → heterogeneous → exogenous). Functions
+   for heterogeneous and exogenous variables are looked up by name in `Main`.
+5. Build `ComputationalSpec` from `parameters.computational` (defaults: T=150,
+   ε=1e-6, dx=1e-8 if not provided).
+6. Build `params` NamedTuple from `parameters.model`.
+7. Compile equilibrium equations via `compile_residuals`.
+8. Parse `steady_states.initial` and (optionally) `steady_states.ending` into
+   `SteadyStateSpec` objects. If only `initial` is present, `ss_ending = ss_initial`
+   (transitory shock assumption).
+9. Return a `SequenceModel`.
 
 # Example
 ```julia
-agg_fns = (KD = (backward = backward_capital, steadystate = steadystate_capital),)
-mod = build_model_from_toml("ModelFile.toml", agg_fns)
+mod = build_model_from_yaml("KrusellSmith.yaml")
 ```
 """
-function build_model_from_toml(file_path::String, agg_fns)
-    toml = TOML.parsefile(file_path)
+function build_model_from_yaml(file_path::String)
+    yaml = YAML.load_file(file_path)
+    dir  = dirname(abspath(file_path))
 
-    # 1. Build heterogeneity dimensions as a NamedTuple
-    dims_dict = toml["Dimensions"]
-    dim_names  = Tuple(Symbol(k) for k in keys(dims_dict))
-    dim_values = Tuple(build_dimension(v) for v in values(dims_dict))
+    # ── 0. Include the model function file ────────────────────────────────────
+    func_file = yaml["file"]["function_file"]
+    include(joinpath(dir, func_file))
+
+    # ── 1. Parse parameters ───────────────────────────────────────────────────
+    # Economic (model) parameters
+    model_params_list = yaml["parameters"]["model"]
+    pnames  = Tuple(Symbol(p["name"]) for p in model_params_list)
+    pvalues = Tuple(_parse_number(p["value"]) for p in model_params_list)
+    params  = NamedTuple{pnames}(pvalues)
+
+    # Computational parameters (with defaults)
+    defaults = Dict("T" => 150, "ε" => 1e-6, "dx" => 1e-8)
+    comp_list = get(get(yaml, "parameters", Dict()), "computational", [])
+    cs = Dict(p["name"] => p["value"] for p in comp_list)
+    T  = Int(get(cs, "T",  defaults["T"]))
+    ε  = Float64(get(cs, "ε",  defaults["ε"]))
+    dx = Float64(get(cs, "dx", defaults["dx"]))
+
+    # ── 2. Build heterogeneity dimensions ─────────────────────────────────────
+    dims_raw   = yaml["dimensions"]
+    dim_names  = Tuple(Symbol(d["name"]) for d in dims_raw)
+    dim_values = Tuple(_build_dimension_from_yaml(d) for d in dims_raw)
     heterogeneity = NamedTuple{dim_names}(dim_values)
 
-    # 2. Build Variable objects in canonical order: endogenous → heterogeneous → exogenous
+    # ── 3. Build Variable objects: endogenous → heterogeneous → exogenous ─────
+    vars_section = yaml["variables"]
 
-    # :endogenous — free Newton unknowns at steady state
-    endog_section = get(toml, "EndogenousVariables", Dict{String,Any}())
-    endog_vars = [Variable(Symbol(k), :endogenous, String(v))
-                  for (k, v) in endog_section]
+    endog_vars = [
+        Variable(Symbol(v["name"]), :endogenous, get(v, "description", ""))
+        for v in get(vars_section, "endogenous", [])
+    ]
 
-    # :heterogeneous — aggregated from household distribution; functions from agg_fns
-    agg_section = get(toml, "AggregatedVariables", Dict{String,Any}())
-    hetero_vars = map(collect(agg_section)) do (name_str, spec)
-        sym  = Symbol(name_str)
-        desc = get(spec, "description", "")
-        fns  = agg_fns[sym]
-        Variable(sym, :heterogeneous, desc, fns.backward, fns.steadystate)
+    hetero_vars = map(get(vars_section, "heterogeneous", [])) do v
+        sym  = Symbol(v["name"])
+        desc = get(v, "description", "")
+        bfn  = _lookup_fn(v["backward_function"])
+        ssfn = _lookup_fn(v["ss_function"])
+        Variable(sym, :heterogeneous, desc, bfn, ssfn, nothing)
     end
 
-    # :exogenous — pinned at steady state / path given externally
-    exog_section = get(toml, "ExogenousVariables", Dict{String,Any}())
-    exog_vars = [Variable(Symbol(k), :exogenous, String(v))
-                 for (k, v) in exog_section]
+    exog_vars = map(get(vars_section, "exogenous", [])) do v
+        sym  = Symbol(v["name"])
+        desc = get(v, "description", "")
+        seq  = haskey(v, "seq_function") ? _lookup_fn(v["seq_function"]) : nothing
+        Variable(sym, :exogenous, desc, nothing, nothing, seq)
+    end
 
     all_var_list  = [endog_vars..., hetero_vars..., exog_vars...]
     all_var_names = Tuple(v.name for v in all_var_list)
     variables     = NamedTuple{all_var_names}(Tuple(all_var_list))
+    n_endog       = length(endog_vars)
 
-    # 3. Build ComputationalSpec from [ComputationalSpecs] (with defaults)
-    defaults = Dict("T" => 150, "ε" => 1e-6, "dx" => 1e-8)
-    csdict = get(toml, "ComputationalSpecs", Dict{String,Any}())
-    if isempty(csdict)
-        println("Note: [ComputationalSpecs] section not found in $file_path — " *
-                "using defaults (T=$(defaults["T"]), ε=$(defaults["ε"]), dx=$(defaults["dx"]))")
-    end
-    function _get_cs(name)
-        if haskey(csdict, name)
-            return isa(csdict[name], Dict) ? csdict[name]["value"] : csdict[name]
-        else
-            println("Note: '$name' not specified in [ComputationalSpecs] — using default $(defaults[name])")
-            return defaults[name]
-        end
-    end
-    compspec = ComputationalSpec(
-        Int(_get_cs("T")),
-        Float64(_get_cs("ε")),
-        Float64(_get_cs("dx")),
-        length(variables)
-    )
-
-    # 4. Build params NamedTuple from [Parameters] (economic params only)
-    pdict  = toml["Parameters"]
-    pnames = Tuple(Symbol(k) for k in keys(pdict))
-    pvalues = Tuple(isa(v["value"], Integer) ? Int(v["value"]) : Float64(v["value"])
-                    for v in values(pdict))
-    params = NamedTuple{pnames}(pvalues)
-
-    # 5. Compile equations (pass all param names — economic + compspec — so compiler
-    #    knows what's a param vs. a variable)
-    equations   = Tuple(toml["Equations"]["equilibrium"])
+    # ── 4. Compile equations ──────────────────────────────────────────────────
+    equations   = Tuple(String(e) for e in yaml["equations"])
     param_names = Set{Symbol}(pnames)
     union!(param_names, Set([:T, :ε, :dx, :n_v]))
+    max_lag, max_lead = detect_max_lag_lead(collect(equations), all_var_names)
     residuals_fn = compile_residuals(collect(equations), all_var_names, param_names)
 
-    # 6. Parse [InitialSteadyState] into ss_pin_vals NamedTuple
-    ss_section   = get(toml, "InitialSteadyState", Dict{String,Any}())
-    pin_keys     = Tuple(Symbol(k) for k in keys(ss_section))
-    pin_vals     = Tuple(Float64(v) for v in values(ss_section))
-    ss_pin_vals  = NamedTuple{pin_keys}(pin_vals)
+    compspec = ComputationalSpec(T, ε, dx, length(variables), n_endog, max_lag, max_lead)
 
-    # 7. Construct SequenceModel
-    return SequenceModel(variables, equations, compspec, params, residuals_fn, ss_pin_vals, heterogeneity)
+    # ── 5. Parse steady states ────────────────────────────────────────────────
+    ss_section = yaml["steady_states"]
+    ss_initial = _parse_ss_spec(ss_section["initial"])
+    ss_ending  = haskey(ss_section, "ending") ?
+                     _parse_ss_spec(ss_section["ending"]) : ss_initial
+
+    return SequenceModel(variables, equations, compspec, params,
+                         residuals_fn, ss_initial, ss_ending, heterogeneity)
 end
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Internal helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
+"""
+    _parse_number(v) -> Int or Float64
+
+Converts a YAML scalar to a Julia number. Integer YAML values become `Int`;
+floating-point values become `Float64`.
+"""
+_parse_number(v::Integer)      = Int(v)
+_parse_number(v::AbstractFloat) = Float64(v)
+_parse_number(v)                = v   # fallback (e.g. strings, though unusual)
+
+
+"""
+    _lookup_fn(name::String) -> Function
+
+Looks up a Julia function by name in `Main`. Throws a descriptive error if the
+function is not defined — typically because the function file was not included
+or contains a typo.
+"""
+function _lookup_fn(name::String)
+    sym = Symbol(name)
+    isdefined(Main, sym) ||
+        error("Function '$name' not found in scope. " *
+              "Check that it is defined in the function_file specified in your YAML.")
+    obj = getfield(Main, sym)
+    obj isa Function ||
+        error("'$name' is defined but is not a Function (got $(typeof(obj))).")
+    return obj
+end
+
+
+"""
+    _parse_ss_spec(spec_dict) -> SteadyStateSpec
+
+Converts a YAML steady-state sub-dictionary (with `fixed` and `guesses` keys)
+into a `SteadyStateSpec`.
+"""
+function _parse_ss_spec(spec_dict)
+    fixed_dict = get(spec_dict, "fixed",   Dict())
+    guess_dict = get(spec_dict, "guesses", Dict())
+
+    fixed_keys  = Tuple(Symbol(k) for k in keys(fixed_dict))
+    fixed_vals  = Tuple(Float64(v) for v in values(fixed_dict))
+    guess_keys  = Tuple(Symbol(k) for k in keys(guess_dict))
+    guess_vals  = Tuple(Float64(v) for v in values(guess_dict))
+
+    return SteadyStateSpec(
+        NamedTuple{fixed_keys}(fixed_vals),
+        NamedTuple{guess_keys}(guess_vals),
+    )
+end
+
+
+"""
+    _build_dimension_from_yaml(dim_dict) -> HeterogeneityDimension
+
+Builds a `HeterogeneityDimension` from a single YAML dimension entry.
+
+Calls the dimension's `grid_function` with its `params` as keyword arguments,
+then validates the return value against the declared dimension type:
+- `:endogenous` — grid function must return a `Vector` of length `n`
+- `:exogenous`  — grid function must return a 2-tuple `(grid, Π)` with
+                  `grid` a length-`n` Vector and `Π` an `n×n` Matrix
+
+Raises a descriptive error on any shape/type mismatch so the user knows
+exactly what their grid function returned vs. what was expected.
+"""
+function _build_dimension_from_yaml(dim_dict)
+    dim_type   = Symbol(dim_dict["type"])
+    dim_name   = dim_dict["name"]
+    fn_name    = dim_dict["grid_function"]
+    params_raw = dim_dict["params"]
+    n          = Int(params_raw["n"])
+    policy_var = haskey(dim_dict, "policy_var") ? Symbol(dim_dict["policy_var"]) : nothing
+
+    # Look up grid function (built-ins are in Main from GeneralStructures.jl)
+    grid_fn = _lookup_fn(fn_name)
+
+    # Call with keyword arguments from the params sub-dict
+    kwargs = Dict(Symbol(k) => v for (k, v) in params_raw)
+    result = grid_fn(; kwargs...)
+
+    if dim_type == :endogenous
+        # ── Validate: must return a 1-D Vector of length n ────────────────────
+        result isa AbstractVector ||
+            error("Grid function '$fn_name' for endogenous dimension '$dim_name' " *
+                  "must return a Vector, got $(typeof(result)).\n" *
+                  "Endogenous grid functions should return a single grid vector.")
+        length(result) == n ||
+            error("Grid function '$fn_name' for endogenous dimension '$dim_name': " *
+                  "expected $n grid points (params.n = $n), got $(length(result)).")
+
+        return HeterogeneityDimension(:endogenous, n,
+                                      collect(Float64, result), nothing, policy_var)
+
+    elseif dim_type == :exogenous
+        # ── Validate: must return a 2-tuple (grid::Vector, Π::Matrix) ─────────
+        (result isa Tuple && length(result) == 2) ||
+            error("Grid function '$fn_name' for exogenous dimension '$dim_name' " *
+                  "must return a 2-tuple (grid, transition_matrix), " *
+                  "got $(typeof(result)).\n" *
+                  "Exogenous grid functions should return (grid_vector, transition_matrix).")
+
+        grid, Π = result
+
+        grid isa AbstractVector ||
+            error("First element (grid) from '$fn_name' for exogenous dimension " *
+                  "'$dim_name' must be a Vector, got $(typeof(grid)).")
+        length(grid) == n ||
+            error("Grid from '$fn_name' for exogenous dimension '$dim_name': " *
+                  "expected $n points (params.n = $n), got $(length(grid)).")
+
+        Π isa AbstractMatrix ||
+            error("Second element (transition matrix) from '$fn_name' for exogenous " *
+                  "dimension '$dim_name' must be a Matrix, got $(typeof(Π)).")
+        size(Π) == (n, n) ||
+            error("Transition matrix from '$fn_name' for exogenous dimension '$dim_name': " *
+                  "expected $(n)×$(n), got $(size(Π)).")
+
+        return HeterogeneityDimension(:exogenous, n,
+                                      collect(Float64, grid), Matrix{Float64}(Π), nothing)
+
+    else
+        error("Unknown dimension type '$dim_type' for dimension '$dim_name'. " *
+              "Expected 'endogenous' or 'exogenous'.")
+    end
+end
