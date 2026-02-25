@@ -1,53 +1,143 @@
 # Description: This file contains the functions to obtain the steady state of the model.
-# For right now, the steady state is obtained using the trust-region method.
-#TODO: The Boehl (2021) method for the steady state to be implemented in the future.
+# Uses a modified Newton-Raphson method with the Moore-Penrose pseudoinverse.
 
 
 """
-    get_SteadyState(model::SequenceModel;
-    guess::Union{NamedTuple, nothing}=nothing)
+    get_SteadyState(model::SequenceModel; initial_guess=nothing) -> SteadyState
 
-Function to obtain the steady state using the trust-region method. 
+Computes the steady state of the model using a modified Newton-Raphson iteration:
+
+    p_{i+1} = p_i - J† z_i
+
+where J† is the Moore-Penrose pseudoinverse (implemented via Julia's `\\` on the
+tall/square Jacobian from ForwardDiff).
+
+## Variable roles at steady state
+
+| Role               | How determined                                      |
+|--------------------|-----------------------------------------------------|
+| `:exogenous`       | Pinned from `model.ss_pin_vals` (TOML `[InitialSteadyState]`) |
+| `:heterogeneous`   | Computed: `steadystate_fn` → policy, then distribution aggregate |
+| `:endogenous` (pinned) | Pinned from `model.ss_pin_vals`                |
+| `:endogenous` (free)   | Newton search variables                        |
+
+The internal function `F : R^{n_free} → R^{n_eq}` assembles the full variable
+vector, evaluates the compiled residuals on an `n_v × 1` matrix (steady-state
+trick: lags/leads collapse to the current value), and returns the residual vector.
+
+`initial_guess` can be a NamedTuple with values for the free endogenous variables,
+e.g. `(Y=1.0, KS=1.0, r=0.02, w=0.1)`. If `nothing`, defaults to `ones(n_free)`.
 """
-function get_SteadyState(model::SequenceModel;
-    guess = nothing) # initial guess for the steady state values
+function get_SteadyState(model::SequenceModel; initial_guess = nothing)
+    ε   = model.compspec.ε
+    n_v = model.compspec.n_v
 
-    @unpack policygrid, Π = model
-    
-    # Define main function such that Fₓ : x → z
-    function Fx(xVals::Vector{Float64}) #TODO: annotate to support dual numbers and float64 vectors
-        a = BackwardSteadyState(xVals, model) # get steady state policies
-        Λ = DistributionTransition(a, model) # get transition matrix
-        D = invariant_dist(Λ') # get invariant distribution
-        z = ResidualsSteadyState(xVals, a, D, model) # get residuals
-        
-        return z
+    # Variables pinned from [InitialSteadyState]: both exogenous and any pinned endogenous
+    pin_keys = keys(model.ss_pin_vals)
+
+    # Free endogenous variables: :endogenous vars NOT listed in ss_pin_vals
+    free_keys = Tuple(k for k in vars_of_type(model, :endogenous) if !(k in pin_keys))
+    n_free    = length(free_keys)
+
+    all_keys = var_names(model)   # ordered symbol tuple, matches xMat rows
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # assemble_xMat: builds an (n_v × 1) matrix from the free-variable vector.
+    #
+    # 1. Insert free endogenous values (from Newton iterate p_vec).
+    # 2. Insert pinned values (from model.ss_pin_vals) — zero derivatives.
+    # 3. For each :heterogeneous variable, call its steadystate_fn to get the
+    #    household policy, build the transition matrix, find the stationary
+    #    distribution, and aggregate.
+    # The n_v × 1 output feeds directly into Residuals, exploiting the lag/lead
+    # identity at steady state (shift_lag on a length-1 vector is a no-op).
+    # ─────────────────────────────────────────────────────────────────────────
+    function assemble_xMat(p_vec::AbstractVector)
+        T_num = eltype(p_vec)
+        xVals = zeros(T_num, n_v)
+
+        # Free endogenous variables
+        for (i, k) in enumerate(free_keys)
+            idx = findfirst(==(k), all_keys)
+            xVals[idx] = p_vec[i]
+        end
+
+        # Pinned variables (exogenous + any pinned endogenous); value converted to T_num
+        for (sym, val) in pairs(model.ss_pin_vals)
+            idx = findfirst(==(sym), all_keys)
+            xVals[idx] = val   # implicit convert Float64 → T_num (zero derivatives)
+        end
+
+        # Aggregated (heterogeneous) variables: policy iteration → distribution → dot
+        for (varname, var) in pairs(model.variables)
+            var.var_type == :heterogeneous || continue
+            policy = var.steadystate_fn(xVals, model)
+            Λ      = make_ss_transition(policy, model)
+            D      = invariant_dist(Λ')          # Λ is column-stochastic; pass Λ'
+            idx    = findfirst(==(varname), all_keys)
+            xVals[idx] = dot(vec(policy), D)
+        end
+
+        return reshape(xVals, n_v, 1)
     end
-    
-    # Initialize steady state guess
-    x̅ = isnothing(guess) ? rand(length(model.varNs)) : collect(values(guess))
-    tol = 1.0
-    ε = model.compspec.ε
-    
-    # find steady state solution (trust region method)
-    sol = nlsolve(Fx, x̅)
-    x = sol.zero
-    
-    # Build the steady state policies and distribution
-    vars = NamedTuple{model.varXs}(x)
-    raw_policies = BackwardSteadyState(x, model)
-    policies = NamedTuple{keys(model.agg_vars)}(ntuple(_ -> raw_policies, length(model.agg_vars)))
-    Λss = DistributionTransition(raw_policies, model)
-    dist = invariant_dist(Λss')
 
-    return SteadyState(vars, policies, Λss, dist)
+    # F : R^{n_free} → R^{n_eq}
+    F(p_vec) = Residuals(assemble_xMat(p_vec), model)
+
+    # Initial guess for free endogenous variables
+    p = if isnothing(initial_guess)
+        ones(Float64, n_free)
+    else
+        Float64[initial_guess[k] for k in free_keys]
+    end
+
+    # Modified Newton: p_{i+1} = p_i - J† z_i
+    # J is (n_eq × n_free); J \ z is the least-squares / exact solution.
+    z        = F(p)
+    iter     = 0
+    max_iter = 1000
+    while norm(z) > ε && iter < max_iter
+        J = ForwardDiff.jacobian(F, p)
+        p = p .- J \ z
+        z = F(p)
+        iter += 1
+    end
+    iter == max_iter &&
+        @warn "get_SteadyState: did not converge in $max_iter iterations (residual norm: $(norm(z)))"
+
+    # Build SteadyState from converged values
+    xVals_final = vec(assemble_xMat(p))
+    vars        = NamedTuple{all_keys}(Tuple(Float64.(xVals_final)))
+
+    het_keys = vars_of_type(model, :heterogeneous)
+    policies_list = map(het_keys) do varname
+        model.variables[varname].steadystate_fn(Float64.(xVals_final), model)
+    end
+    policies = NamedTuple{het_keys}(Tuple(policies_list))
+
+    # Transition matrix and stationary distribution from the first heterogeneous variable
+    first_policy = policies[het_keys[1]]
+    Λss = make_ss_transition(first_policy, model)
+    D   = invariant_dist(Λss')
+
+    return SteadyState(vars, policies, Λss, D)
 end
 
 
 # Test Run
 
 function test_SteadyState()
-    varXs = (:Y, :KS, :r, :w, :Z)
+    # Build variables NamedTuple: endogenous → heterogeneous → exogenous
+    variables = (
+        Y  = Variable(:Y,  :endogenous,    "Output"),
+        KS = Variable(:KS, :endogenous,    "Capital supply"),
+        r  = Variable(:r,  :endogenous,    "Interest rate"),
+        w  = Variable(:w,  :endogenous,    "Wages"),
+        KD = Variable(:KD, :heterogeneous, "Capital demand (aggregated from HH)",
+                      backward_capital, steadystate_capital),
+        Z  = Variable(:Z,  :exogenous,     "Productivity"),
+    )
+
     equations = (
         "Y = Z * KS(-1)^α",
         "r + δ = α * Z * KS(-1)^(α-1)",
@@ -56,7 +146,7 @@ function test_SteadyState()
     )
 
     # Computational specs
-    compspec = ComputationalSpec(150, 1e-9, 0.0001, length(varXs))
+    compspec = ComputationalSpec(150, 1e-9, 0.0001, length(variables))
 
     # Economic parameters as NamedTuple
     params = (β = 0.98, γ = 1.0, δ = 0.025, α = 0.11)
@@ -64,7 +154,7 @@ function test_SteadyState()
     # Compile equations
     param_names = Set(keys(params))
     union!(param_names, Set([:T, :ε, :dx, :n_v]))
-    residuals_fn = compile_residuals(collect(equations), varXs, param_names)
+    residuals_fn = compile_residuals(collect(equations), keys(variables), param_names)
 
     # Build heterogeneity dimensions
     wealth_config = Dict("type" => "endogenous", "grid_method" => "DoubleExponential",
@@ -74,11 +164,13 @@ function test_SteadyState()
     heterogeneity = (wealth = build_dimension(wealth_config),
                      productivity = build_dimension(prod_config))
 
-    agg_vars = (KD = (backward = backward_capital, steadystate = steadystate_capital),)
-    mod = SequenceModel(varXs, equations, compspec, params, residuals_fn, agg_vars, heterogeneity)
+    # Pinned steady-state values from [InitialSteadyState] (Z is exogenous)
+    ss_pin_vals = (Z = 1.0,)
 
-    # Obtain steady state
-    ss = get_SteadyState(mod, guess = (Y = 1.0, KS = 1.0, r = 0.02, w = 0.1, Z = 1.0))
+    mod = SequenceModel(variables, equations, compspec, params, residuals_fn, ss_pin_vals, heterogeneity)
+
+    # Obtain steady state (initial_guess for free endogenous variables only; Z is pinned)
+    ss = get_SteadyState(mod, initial_guess = (Y = 1.0, KS = 1.0, r = 0.02, w = 0.1))
 
     return mod, ss
 end
@@ -118,7 +210,7 @@ end
 function directJVPJacobian(mod, 
     stst)
 
-    @unpack T, n_v = mod.params
+    @unpack T, n_v = mod.compspec
     n = (T - 1) * n_v
     idmat = sparse(1.0I, n, n)
     xVec = repeat([values(stst.vars)...], T-1)
@@ -144,7 +236,7 @@ end
 function directNumJacobian(mod, 
     stst)
 
-    @unpack T, n_v = mod.params
+    @unpack T, n_v = mod.compspec
     n = (T - 1) * n_v
     idmat = sparse(1.0I, n, n)
     xVec = repeat([values(stst.vars)...], T-1)

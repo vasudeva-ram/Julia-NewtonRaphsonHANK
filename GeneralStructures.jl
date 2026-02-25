@@ -137,6 +137,73 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
+    Variable{B, S}
+
+Describes a single aggregate variable in the model. Carries both metadata
+(name, type, description) and — for heterogeneous variables — the functions
+needed to compute it from household policies.
+
+Type parameters:
+- `B`: concrete type of `backward_fn` (`typeof(backward_capital)` or `Nothing`)
+- `S`: concrete type of `steadystate_fn` (`typeof(steadystate_capital)` or `Nothing`)
+
+These type parameters ensure that calls to `var.backward_fn(...)` are statically
+dispatched — no dynamic dispatch through an abstract `Function` type. Since each
+`Variable{B,S}` stored in `model.variables` is fully concrete, and `SequenceModel`
+captures the entire `variables` NamedTuple type in its `V` parameter, the compiler
+sees exact function types throughout the backward/forward iteration hot loops.
+
+Fields:
+- `name::Symbol`: variable identifier, e.g. `:KD`
+- `var_type::Symbol`: one of `:endogenous`, `:exogenous`, or `:heterogeneous`
+  - `:endogenous`    — free variable in the Newton search at steady state
+  - `:exogenous`     — pinned by `[InitialSteadyState]` / `[ExogenousPaths]` in TOML
+  - `:heterogeneous` — aggregated from the household distribution; requires
+                       `backward_fn` and `steadystate_fn`
+- `description::String`: human-readable label, e.g. `"Capital demand"`
+- `backward_fn::B`: for `:heterogeneous` variables, the EGM backward-step function
+  `(xVals, currentpolicy, model) -> policy_matrix`; `nothing` otherwise
+- `steadystate_fn::S`: for `:heterogeneous` variables, the steady-state policy
+  iterator `(xVals, model) -> policy_matrix`; `nothing` otherwise
+"""
+struct Variable{B, S}
+    name::Symbol
+    var_type::Symbol
+    description::String
+    backward_fn::B
+    steadystate_fn::S
+end
+
+"""
+    Variable(name, var_type, description)
+
+Convenience constructor for `:endogenous` and `:exogenous` variables that
+have no associated household functions. Produces `Variable{Nothing, Nothing}`.
+"""
+Variable(name::Symbol, var_type::Symbol, description::String) =
+    Variable(name, var_type, description, nothing, nothing)
+
+
+"""
+    var_names(model::SequenceModel) -> Tuple{Vararg{Symbol}}
+
+Returns the ordered tuple of all aggregate variable names in the model,
+matching the row ordering of `xMat`.
+"""
+var_names(model) = keys(model.variables)
+
+
+"""
+    vars_of_type(model::SequenceModel, t::Symbol) -> Tuple{Vararg{Symbol}}
+
+Returns the names of all variables whose `var_type` equals `t`.
+`t` should be one of `:endogenous`, `:exogenous`, or `:heterogeneous`.
+"""
+vars_of_type(model, t::Symbol) =
+    Tuple(k for (k, v) in pairs(model.variables) if v.var_type == t)
+
+
+"""
     ComputationalSpec
 
 Fixed computational parameters required by every model. These define the
@@ -158,19 +225,23 @@ end
 
 
 """
-    SequenceModel{F, A, H, P}
+    SequenceModel{F, H, P, V, C}
 
 Complete specification of a heterogeneous agent model for the sequence-space solver.
 
 Type parameters:
 - `F`: type of the compiled residuals function
-- `A`: type of the aggregated variables NamedTuple
 - `H`: type of the heterogeneity NamedTuple
 - `P`: type of the parameters NamedTuple
+- `V`: type of the variables NamedTuple
+- `C`: type of the pinned steady-state values NamedTuple
 
 Fields:
-- `varXs`: tuple of all aggregate variable names (endogenous + exogenous),
-   e.g., `(:Y, :KS, :KD, :r, :w, :Z)`
+- `variables`: NamedTuple mapping each variable symbol to a `Variable` object,
+   e.g., `(Y = Variable(:Y, :endogenous, …), KD = Variable(:KD, :heterogeneous, …), …)`.
+   The NamedTuple ordering defines the row ordering of `xMat` throughout the solver.
+   Use `var_names(model)` to get the ordered symbol tuple and `vars_of_type(model, t)`
+   to filter by `:endogenous`, `:exogenous`, or `:heterogeneous`.
 - `equations`: equilibrium equation strings in immutable order,
    e.g., `("Y = Z * KS(-1)^α", ...)`
 - `compspec`: `ComputationalSpec` — solver configuration (T, ε, dx, n_v)
@@ -179,19 +250,20 @@ Fields:
    models can have different parameters without changing any struct definitions.
 - `residuals_fn`: compiled function `(xMat::AbstractMatrix, params) -> Vector`
    produced by `compile_residuals`
-- `agg_vars`: NamedTuple mapping aggregated variable symbols to
-   `(backward, forward)` function pairs,
-   e.g., `(KD = (backward = backward_capital, forward = agg_capital),)`
+- `ss_pin_vals`: NamedTuple of steady-state values for pinned variables, parsed from
+   `[InitialSteadyState]` in the TOML. Exogenous variables and any endogenous variables
+   that the user wants to hold fixed at steady state must appear here.
+   E.g., `(Z = 1.0,)` for the KS model.
 - `heterogeneity`: NamedTuple of `HeterogeneityDimension` objects,
    e.g., `(wealth = HeterogeneityDimension(...), productivity = HeterogeneityDimension(...))`
 """
-struct SequenceModel{F, A, H, P}
-    varXs::Tuple{Vararg{Symbol}}
+struct SequenceModel{F, H, P, V, C}
+    variables::V
     equations::Tuple{Vararg{String}}
     compspec::ComputationalSpec
     params::P
     residuals_fn::F
-    agg_vars::A
+    ss_pin_vals::C
     heterogeneity::H
 end
 

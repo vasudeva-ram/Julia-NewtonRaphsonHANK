@@ -8,11 +8,11 @@
 """
     BackwardIteration(xVec, model::SequenceModel, end_ss::SteadyState)
 
-Performs the Backward Iteration algorithm for all aggregated variables.
-For each aggregated variable in `model.agg_vars`, calls its backward function
+Performs the Backward Iteration algorithm for all heterogeneous variables.
+For each `:heterogeneous` variable in `model.variables`, calls its `backward_fn`
 to produce a sequence of T-1 disaggregated policy matrices (iterating from T back to 1).
 
-Returns a NamedTuple mapping each aggregated variable name to its policy sequence
+Returns a NamedTuple mapping each heterogeneous variable name to its policy sequence
 (a Vector of T-1 matrices), e.g., `(KD = [mat1, mat2, ..., mat_{T-1}],)`.
 """
 function BackwardIteration(xVec, # (n_v x T-1) vector of variable values
@@ -24,10 +24,10 @@ function BackwardIteration(xVec, # (n_v x T-1) vector of variable values
     TF = eltype(xVec)
     xMat = transpose(reshape(xVec, (model.compspec.n_v, T-1))) # make it `T-1 x n_v` matrix
 
-    # For each aggregated variable, run its backward function over T-1 periods
-    agg_keys = keys(model.agg_vars)
+    # For each heterogeneous variable, run its backward_fn over T-1 periods
+    agg_keys = vars_of_type(model, :heterogeneous)
     seqs = map(agg_keys) do varname
-        spec = model.agg_vars[varname]
+        var = model.variables[varname]
         ss_policy = end_ss.policies[varname]
 
         # Initialize with terminal steady state policy
@@ -36,7 +36,7 @@ function BackwardIteration(xVec, # (n_v x T-1) vector of variable values
 
         # Iterate backwards from T-1 to 1
         for i in 1:T-1
-            policies[T-i] = spec.backward(xMat[T-i,:], policies[T+1-i], model)
+            policies[T-i] = var.backward_fn(xMat[T-i,:], policies[T+1-i], model)
         end
 
         return policies[1:T-1]

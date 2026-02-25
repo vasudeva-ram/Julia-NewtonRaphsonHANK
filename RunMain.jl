@@ -54,7 +54,7 @@ x_fin = NewtonRaphsonHANK(xVec, J, mod, stst, Zexog);
 
 
 xFinMat = reshape(x_fin, (mod.compspec.n_v, T-1)) # reshape to (n_v, T-1) matrix
-namedXfins = NamedTuple{mod.varXs}(Tuple([xFinMat[i, :] for i in 1:mod.compspec.n_v]))
+namedXfins = NamedTuple{var_names(mod)}(Tuple([xFinMat[i, :] for i in 1:mod.compspec.n_v]))
 
 for key in keys(namedXfins)
     plot(namedXfins[key], collect(1:T-1), label="$(key)")

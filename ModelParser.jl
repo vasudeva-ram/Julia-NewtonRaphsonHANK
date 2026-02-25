@@ -152,7 +152,7 @@ end
 
 
 """
-    compile_residuals(equations::Vector{String}, varXs::Tuple{Vararg{Symbol}},
+    compile_residuals(equations::Vector{String}, var_syms::Tuple{Vararg{Symbol}},
                       param_names::Set{Symbol})
 
 Compiles a vector of equation strings into a single Julia function
@@ -171,15 +171,16 @@ The compilation pipeline:
 The resulting function is ordinary compiled Julia code (no runtime `eval`),
 so it is fully compatible with ForwardDiff and Zygote for automatic differentiation.
 
-Variables are identified by matching symbols against `varXs`.
+Variables are identified by matching symbols against `var_syms` (pass `var_names(model)`
+or `keys(model.variables)` to get the ordered symbol tuple from a built model).
 Parameters are identified by matching against the explicitly provided `param_names`.
 
 The output vector is ordered: all equations at t=1, all equations at t=2, ...
 (column-major vectorization of a k × (T-1) residual matrix).
 """
-function compile_residuals(equations::Vector{String}, varXs::Tuple{Vararg{Symbol}},
+function compile_residuals(equations::Vector{String}, var_syms::Tuple{Vararg{Symbol}},
                            param_names::Set{Symbol})
-    var_indices = Dict(sym => i for (i, sym) in enumerate(varXs))
+    var_indices = Dict(sym => i for (i, sym) in enumerate(var_syms))
 
     # Generate a unique symbol for each equation's residual
     residual_syms = [Symbol("_r_", i) for i in 1:length(equations)]
@@ -222,13 +223,14 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
-    build_model_from_toml(file_path::String, agg_vars) -> SequenceModel
+    build_model_from_toml(file_path::String, agg_fns) -> SequenceModel
 
 Constructs a complete `SequenceModel` from a TOML specification file.
 
 Reads all sections of the TOML and performs the following steps:
 1. Builds heterogeneity dimensions from `[Dimensions.*]` sections via `build_dimension`
-2. Collects variable names from `[EndogenousVariables]` and `[ExogenousVariables]`
+2. Constructs `Variable` objects from `[EndogenousVariables]`, `[AggregatedVariables]`,
+   and `[ExogenousVariables]` sections, in that order (determining row order in `xMat`)
 3. Builds `ComputationalSpec` from `[ComputationalSpecs]` section (T, ε, dx).
    If the section or individual fields are missing, defaults are used
    (T=150, ε=1e-6, dx=1e-8) and a message is printed.
@@ -236,37 +238,61 @@ Reads all sections of the TOML and performs the following steps:
 5. Compiles equilibrium equations from `[Equations]` via `compile_residuals`
 6. Assembles everything into a `SequenceModel`
 
-The `agg_vars` argument must be provided directly as a NamedTuple of
-`(backward, forward)` function pairs, since Julia functions cannot be
+`agg_fns` must be provided by the caller as a NamedTuple of
+`(backward=fn, steadystate=fn)` pairs, since Julia functions cannot be
 referenced by name in TOML. The TOML `[AggregatedVariables]` section
-documents which functions are expected, but the actual function objects
-must be passed in by the caller.
+documents which function names are expected; the actual function objects
+must be passed here.
+
+Variable ordering in `model.variables` (and hence row ordering of `xMat`):
+  endogenous (:endogenous) → heterogeneous (:heterogeneous) → exogenous (:exogenous)
 
 # Example
 ```julia
-agg_vars = (KD = (backward = backward_capital, forward = agg_capital),)
-mod = build_model_from_toml("ModelFile.toml", agg_vars)
+agg_fns = (KD = (backward = backward_capital, steadystate = steadystate_capital),)
+mod = build_model_from_toml("ModelFile.toml", agg_fns)
 ```
 """
-function build_model_from_toml(file_path::String, agg_vars)
+function build_model_from_toml(file_path::String, agg_fns)
     toml = TOML.parsefile(file_path)
 
     # 1. Build heterogeneity dimensions as a NamedTuple
     dims_dict = toml["Dimensions"]
-    dim_names = Tuple(Symbol(k) for k in keys(dims_dict))
+    dim_names  = Tuple(Symbol(k) for k in keys(dims_dict))
     dim_values = Tuple(build_dimension(v) for v in values(dims_dict))
     heterogeneity = NamedTuple{dim_names}(dim_values)
 
-    # 2. Build variable tuples
-    endog_vars = Tuple(Symbol(k) for k in keys(toml["EndogenousVariables"]))
-    exog_vars = Tuple(Symbol(k) for k in keys(toml["ExogenousVariables"]))
-    varXs = (endog_vars..., exog_vars...)
+    # 2. Build Variable objects in canonical order: endogenous → heterogeneous → exogenous
+
+    # :endogenous — free Newton unknowns at steady state
+    endog_section = get(toml, "EndogenousVariables", Dict{String,Any}())
+    endog_vars = [Variable(Symbol(k), :endogenous, String(v))
+                  for (k, v) in endog_section]
+
+    # :heterogeneous — aggregated from household distribution; functions from agg_fns
+    agg_section = get(toml, "AggregatedVariables", Dict{String,Any}())
+    hetero_vars = map(collect(agg_section)) do (name_str, spec)
+        sym  = Symbol(name_str)
+        desc = get(spec, "description", "")
+        fns  = agg_fns[sym]
+        Variable(sym, :heterogeneous, desc, fns.backward, fns.steadystate)
+    end
+
+    # :exogenous — pinned at steady state / path given externally
+    exog_section = get(toml, "ExogenousVariables", Dict{String,Any}())
+    exog_vars = [Variable(Symbol(k), :exogenous, String(v))
+                 for (k, v) in exog_section]
+
+    all_var_list  = [endog_vars..., hetero_vars..., exog_vars...]
+    all_var_names = Tuple(v.name for v in all_var_list)
+    variables     = NamedTuple{all_var_names}(Tuple(all_var_list))
 
     # 3. Build ComputationalSpec from [ComputationalSpecs] (with defaults)
     defaults = Dict("T" => 150, "ε" => 1e-6, "dx" => 1e-8)
     csdict = get(toml, "ComputationalSpecs", Dict{String,Any}())
     if isempty(csdict)
-        println("Note: [ComputationalSpecs] section not found in $file_path — using defaults (T=$(defaults["T"]), ε=$(defaults["ε"]), dx=$(defaults["dx"]))")
+        println("Note: [ComputationalSpecs] section not found in $file_path — " *
+                "using defaults (T=$(defaults["T"]), ε=$(defaults["ε"]), dx=$(defaults["dx"]))")
     end
     function _get_cs(name)
         if haskey(csdict, name)
@@ -280,11 +306,11 @@ function build_model_from_toml(file_path::String, agg_vars)
         Int(_get_cs("T")),
         Float64(_get_cs("ε")),
         Float64(_get_cs("dx")),
-        length(varXs)
+        length(variables)
     )
 
     # 4. Build params NamedTuple from [Parameters] (economic params only)
-    pdict = toml["Parameters"]
+    pdict  = toml["Parameters"]
     pnames = Tuple(Symbol(k) for k in keys(pdict))
     pvalues = Tuple(isa(v["value"], Integer) ? Int(v["value"]) : Float64(v["value"])
                     for v in values(pdict))
@@ -292,13 +318,19 @@ function build_model_from_toml(file_path::String, agg_vars)
 
     # 5. Compile equations (pass all param names — economic + compspec — so compiler
     #    knows what's a param vs. a variable)
-    equations = Tuple(toml["Equations"]["equilibrium"])
+    equations   = Tuple(toml["Equations"]["equilibrium"])
     param_names = Set{Symbol}(pnames)
     union!(param_names, Set([:T, :ε, :dx, :n_v]))
-    residuals_fn = compile_residuals(collect(equations), varXs, param_names)
+    residuals_fn = compile_residuals(collect(equations), all_var_names, param_names)
 
-    # 6. Construct SequenceModel
-    return SequenceModel(varXs, equations, compspec, params, residuals_fn, agg_vars, heterogeneity)
+    # 6. Parse [InitialSteadyState] into ss_pin_vals NamedTuple
+    ss_section   = get(toml, "InitialSteadyState", Dict{String,Any}())
+    pin_keys     = Tuple(Symbol(k) for k in keys(ss_section))
+    pin_vals     = Tuple(Float64(v) for v in values(ss_section))
+    ss_pin_vals  = NamedTuple{pin_keys}(pin_vals)
+
+    # 7. Construct SequenceModel
+    return SequenceModel(variables, equations, compspec, params, residuals_fn, ss_pin_vals, heterogeneity)
 end
 
 

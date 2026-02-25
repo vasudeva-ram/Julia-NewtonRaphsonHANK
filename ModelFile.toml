@@ -30,7 +30,6 @@ process = "AR1"
 [EndogenousVariables]
 Y = "Output"
 KS = "Capital supply"
-KD = "Capital demand (aggregated from HH)"
 r = "Interest rate"
 w = "Wages"
 
@@ -46,6 +45,7 @@ equilibrium = [
 ]
 
 [AggregatedVariables.KD]
+description = "Capital demand (aggregated from HH)"
 BackwardFunction = "backward_capital"
 SteadyStateFunction = "steadystate_capital"
 
