@@ -11,7 +11,7 @@ Generic residuals function that evaluates the model's compiled equations
 against the variable matrix `xMat` (n_v × T-1).
 
 All variables (endogenous, exogenous, aggregated) should be rows of `xMat`,
-ordered to match `model.varXs`. Returns a vector of residuals ordered as:
+ordered to match `var_names(model)`. Returns a vector of residuals ordered as:
 all equations at t=1, all equations at t=2, ... (column-major of k × (T-1)).
 
 This is the main residuals function in the pipeline:

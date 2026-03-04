@@ -23,27 +23,32 @@ println("  max_lag  = $(mod.compspec.max_lag)")
 println("  max_lead = $(mod.compspec.max_lead)")
 println()
 
-println("=== Running get_SteadyState ===")
+# asm = SSAssembler(mod)
+# p = Float64[get(mod.ss_initial.guesses, k, 1.0) for k in asm.free_keys]
+# xvls = get_xVals(asm, p)
+
+
+println("=== Running get_SteadyStates ===")
 t0 = time()
-ss = get_SteadyState(mod)
+ss_initial, ss_ending = get_SteadyStates(mod)
 elapsed = time() - t0
 println("  Elapsed: $(round(elapsed; digits=2)) s")
 println()
 
-println("=== Steady-state variable values ===")
-for (k, v) in pairs(ss.vars)
+println("=== Initial steady-state variable values ===")
+for (k, v) in pairs(ss_initial.vars)
     println("  $k = $(round(v; digits=6))")
 end
 println()
 
-println("=== Checking equilibrium conditions manually ===")
+println("=== Checking equilibrium conditions manually (initial SS) ===")
 @unpack α, δ = mod.params
-Z  = ss.vars.Z
-KS = ss.vars.KS
-KD = ss.vars.KD
-r  = ss.vars.r
-w  = ss.vars.w
-Y  = ss.vars.Y
+Z  = ss_initial.vars.Z
+KS = ss_initial.vars.KS
+KD = ss_initial.vars.KD
+r  = ss_initial.vars.r
+w  = ss_initial.vars.w
+Y  = ss_initial.vars.Y
 
 println("  Y   = Z * KS^α           →  $(round(Z * KS^α; digits=6))  (model: $(round(Y; digits=6)))")
 println("  r+δ = α*Z*KS^(α-1)       →  $(round(α*Z*KS^(α-1); digits=6))  (model: $(round(r+δ; digits=6)))")
@@ -51,8 +56,7 @@ println("  w   = (1-α)*Z*KS^α       →  $(round((1-α)*Z*KS^α; digits=6))  (
 println("  KS  = KD                  →  KS=$(round(KS; digits=6))  KD=$(round(KD; digits=6))")
 println()
 
-println("=== Residual norm at SS ===")
-# Assemble the 1-period padded xMat and evaluate residuals
+println("=== Residual norm at initial SS ===")
 all_keys = var_names(mod)
 max_lag  = mod.compspec.max_lag
 max_lead = mod.compspec.max_lead
@@ -62,7 +66,7 @@ n_v      = mod.compspec.n_v
 xMat_ss = zeros(n_v, T_pad)
 for col in 1:T_pad
     for (i, k) in enumerate(all_keys)
-        xMat_ss[i, col] = ss.vars[k]
+        xMat_ss[i, col] = ss_initial.vars[k]
     end
 end
 

@@ -113,8 +113,8 @@ j = (e_flat - 1)·n_a + a,   e_flat = column-major index over e1,…,eK
 ```
 
 **Policy matrix convention**: `policy_seqs[varname][t]` must be `(n_a × n_exog)`
-with columns indexed by `e_flat` (matches `backward_capital`'s output for a
-single exogenous dim).
+with columns indexed by `e_flat` (matches the output of `BackwardIteration` for
+a single exogenous dimension).
 
 ## Algorithm (per period t)
 
@@ -190,129 +190,6 @@ function ForwardIteration(policy_seqs::NamedTuple,
     end
 
     return NamedTuple{het_keys}(Tuple(agg_data))
-end
-
-
-"""
-    make_ss_transition(policy_mat, model::SequenceModel) -> SparseMatrixCSC
-
-Builds the full joint (column-stochastic) transition matrix for the steady-state
-distribution from a single time-invariant policy matrix.
-
-This is the same Kronecker + Young's composition used inside `ForwardIteration`,
-extracted here so `get_SteadyState` can compute the stationary distribution
-without constructing a full T-1 period path.
-
-AD-compatible: when `policy_mat` contains ForwardDiff dual numbers the returned
-matrix carries dual element types, propagating derivatives into `invariant_dist`.
-
-Call `invariant_dist(make_ss_transition(policy, model)')` to get the stationary
-distribution (pass the transpose because `invariant_dist` expects a row-stochastic
-input, while our convention is column-stochastic Λ).
-"""
-function make_ss_transition(policy_mat, model::SequenceModel)
-    endog_dims = [(name, dim) for (name, dim) in pairs(model.heterogeneity)
-                  if dim.dim_type == :endogenous]
-    exog_dims  = [(name, dim) for (name, dim) in pairs(model.heterogeneity)
-                  if dim.dim_type == :exogenous]
-
-    n_endog = prod(d.n for (_, d) in endog_dims)
-    n_exog  = prod(d.n for (_, d) in exog_dims)
-
-    length(endog_dims) == 1 ||
-        error("make_ss_transition: exactly one endogenous dimension supported " *
-              "(got $(length(endog_dims)))")
-    endog_dim = endog_dims[1][2]
-
-    # Build time-invariant exogenous Kronecker factor (always Float64)
-    Λ_exog = spdiagm(0 => ones(Float64, n_endog))
-    for (_, dim) in exog_dims
-        Π_T = copy((dim.transition::Matrix{Float64})')
-        Λ_exog = kron(sparse(Π_T), Λ_exog)
-    end
-
-    Λ_endog = make_endogenous_transition(policy_mat, endog_dim, n_exog)
-    return Λ_exog * Λ_endog
-end
-
-
-"""
-    DistributionTransition(policy, model::SequenceModel)
-
-Constructs the full joint transition matrix Λ using Young's (2010) method,
-composing the endogenous wealth transition with the exogenous productivity
-transition in a single pass.
-
-Legacy function retained for use in `get_SteadyState` (computing the
-stationary distribution). Use `make_endogenous_transition` + Kronecker
-composition for new code.
-"""
-function DistributionTransition1(policy, # savings policy function
-    model::SequenceModel)
-
-    @unpack policygrid, Π = model
-    @unpack n_a, n_e = model.params
-
-    n_m = n_a * n_e
-    Jbases = [(ne -1)*n_a for ne in 1:n_e]
-    Is = Int64[]
-    Js = Int64[]
-    Vs = eltype(policy)[]
-
-    for col in eachindex(policy)
-        m = findfirst(x->x>=policy[col], policygrid)
-        j = div(col - 1, n_a) + 1
-        if m == 1
-            append!(Is, m .+ Jbases)
-            append!(Js, fill(col, n_e))
-            append!(Vs, 1.0 .* Π[j,:])
-        else
-            append!(Is, (m-1) .+ Jbases)
-            append!(Is, m .+ Jbases)
-            append!(Js, fill(col, 2*n_e))
-            w = (policy[col] - policygrid[m-1]) / (policygrid[m] - policygrid[m-1])
-            append!(Vs, (1.0 - w) .* Π[j,:])
-            append!(Vs, w .* Π[j,:])
-        end
-    end
-
-    Λ = sparse(Is, Js, Vs, n_m, n_m)
-
-    return Λ
-end
-
-
-function DistributionTransition2(policy,
-    model::SequenceModel)
-
-    @unpack policygrid, Π = model
-    @unpack n_a, n_e = model.params
-
-    n_m = n_a * n_e
-    Jbases = [(ne - 1) * n_a for ne in 1:n_e]
-
-    Is = Int64[]
-    Js = Int64[]
-    Vs = eltype(policy)[]
-
-    for col in eachindex(policy)
-        m = findfirst(x -> x >= policy[col], policygrid)
-        j = div(col - 1, n_a) + 1
-        if m == 1
-            Is = vcat(Is, m .+ Jbases)
-            Js = vcat(Js, fill(col, n_e))
-            Vs = vcat(Vs, 1.0 .* Π[j, :])
-        else
-            Is = vcat(Is, (m - 1) .+ Jbases, m .+ Jbases)
-            Js = vcat(Js, fill(col, 2 * n_e))
-            w = (policy[col] - policygrid[m - 1]) / (policygrid[m] - policygrid[m - 1])
-            Vs = vcat(Vs, (1.0 - w) .* Π[j, :], w .* Π[j, :])
-        end
-    end
-
-    Λ = sparse(Is, Js, Vs, n_m, n_m)
-
-    return Λ
 end
 
 
@@ -453,4 +330,3 @@ function invariant_dist(Π::AbstractMatrix{<:ForwardDiff.Dual})
             for i in 1:n]
 end
 
-DistributionTransition = DistributionTransition2

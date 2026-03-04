@@ -270,7 +270,7 @@ Constructs a complete `SequenceModel` from a YAML specification file.
 
 Steps performed:
 1. Parse the YAML file.
-2. `include` the model's `function_file` (e.g. `ks_model_functions.jl`), making
+2. `include` the model's `function_file` (e.g. `KrusellSmith.jl`), making
    all model-specific Julia functions available by name.
 3. Build heterogeneity dimensions by calling each dimension's `grid_function`
    with the `params` dict as keyword arguments. Return values are validated:
@@ -330,19 +330,28 @@ function build_model_from_yaml(file_path::String)
         for v in get(vars_section, "endogenous", [])
     ]
 
-    hetero_vars = map(get(vars_section, "heterogeneous", [])) do v
+    # Heterogeneous variables: list items with a "name" key are variable defs;
+    # exactly one item with a "function" key specifies the shared value function.
+    het_raw      = get(vars_section, "heterogeneous", [])
+    het_var_defs = filter(v -> haskey(v, "name"),     het_raw)
+    het_fn_defs  = filter(v -> haskey(v, "function"), het_raw)
+    length(het_fn_defs) == 1 ||
+        error("The 'heterogeneous' variables section must contain exactly one " *
+              "'function' entry (got $(length(het_fn_defs))). " *
+              "This function maps ∂V/∂a' → (Value=∂V/∂a, <het vars>...).")
+    value_fn = _lookup_fn(het_fn_defs[1]["function"])
+
+    hetero_vars = map(het_var_defs) do v
         sym  = Symbol(v["name"])
         desc = get(v, "description", "")
-        bfn  = _lookup_fn(v["backward_function"])
-        ssfn = _lookup_fn(v["ss_function"])
-        Variable(sym, :heterogeneous, desc, bfn, ssfn, nothing)
+        Variable(sym, :heterogeneous, desc)
     end
 
     exog_vars = map(get(vars_section, "exogenous", [])) do v
         sym  = Symbol(v["name"])
         desc = get(v, "description", "")
         seq  = haskey(v, "seq_function") ? _lookup_fn(v["seq_function"]) : nothing
-        Variable(sym, :exogenous, desc, nothing, nothing, seq)
+        Variable(sym, :exogenous, desc, seq)
     end
 
     all_var_list  = [endog_vars..., hetero_vars..., exog_vars...]
@@ -366,7 +375,7 @@ function build_model_from_yaml(file_path::String)
                      _parse_ss_spec(ss_section["ending"]) : ss_initial
 
     return SequenceModel(variables, equations, compspec, params,
-                         residuals_fn, ss_initial, ss_ending, heterogeneity)
+                         residuals_fn, ss_initial, ss_ending, heterogeneity, value_fn)
 end
 
 

@@ -11,18 +11,19 @@ values of all aggregate variables, the household policy functions, the
 transition matrix, and the stationary distribution over household states.
 
 Fields:
-- `vars`: NamedTuple of steady-state variable values, ordered to match
-   `model.varXs` (e.g., `(Y=1.0, KS=3.5, r=0.02, w=0.9, Z=1.0)`)
-- `policies`: NamedTuple of policy matrices, one per aggregated variable,
-   ordered to match `model.agg_vars` (e.g., `(KD = Matrix{Float64},)`)
-- `Λ`: sparse transition matrix for the distribution (from `DistributionTransition`)
-- `D`: stationary distribution vector (length `n_a * n_e`)
+- `vars`: NamedTuple of steady-state variable values, keyed by `var_names(model)`
+   (e.g., `(Y=1.0, KS=3.5, r=0.02, w=0.9, Z=1.0)`)
+- `policies`: NamedTuple of policy matrices, one per `:heterogeneous` variable
+   (e.g., `(KD = Matrix{Float64},)`)
+- `Λ`: column-stochastic joint transition matrix (endogenous × exogenous Kronecker)
+- `D`: stationary distribution vector (length `n_endog_states * n_exog_states`)
 """
-struct SteadyState
+struct SteadyState{VT}
     vars::NamedTuple
     policies::NamedTuple
     Λ::SparseMatrixCSC{Float64,Int64}
     D::Vector{Float64}
+    value::VT    # steady-state marginal value ∂V/∂a (n_a × n_e); terminal condition for backward iteration
 end
 
 
@@ -41,7 +42,7 @@ an updated `Λ_endog` — avoiding O(n²) Kronecker products on every call.
   These are the Newton search variables — the components of `p_vec`.
 - **Pinned** (`ss_initial.fixed`): exogenous vars and any endogenous vars the
   user wants held fixed. Assigned with zero ForwardDiff derivatives.
-- **Heterogeneous**: computed from `steadystate_fn → Λ → invariant_dist → dot`.
+- **Heterogeneous**: computed from `model.value_fn` (inner VFI) → `make_endogenous_transition` → `invariant_dist` → `dot`.
 
 ## Calling convention
 
@@ -51,8 +52,9 @@ Returns an `n_v × T_pad` padded matrix (all columns identical at SS) suitable
 for the compiled residuals function. Use `get_xVals(asm, p_vec)` to obtain just
 the length-`n_v` vector without tiling.
 """
-struct SSAssembler{M}
+struct SSAssembler{M, SS}
     model::M
+    ss_spec::SS                             # SteadyStateSpec for this solve (initial or ending)
     all_keys::Tuple{Vararg{Symbol}}
     free_keys::Tuple{Vararg{Symbol}}
     n_free::Int
@@ -62,12 +64,13 @@ struct SSAssembler{M}
 end
 
 """
-    SSAssembler(model::SequenceModel) -> SSAssembler
+    SSAssembler(model::SequenceModel, ss_spec::SteadyStateSpec) -> SSAssembler
 
-Derives variable roles from `ss_initial.fixed` and precomputes `Λ_exog`.
+Derives variable roles from `ss_spec.fixed` and precomputes `Λ_exog`.
+`ss_spec` is either `model.ss_initial` or `model.ss_ending`.
 """
-function SSAssembler(model::SequenceModel)
-    pin_keys  = keys(model.ss_initial.fixed)
+function SSAssembler(model::SequenceModel, ss_spec)
+    pin_keys  = keys(ss_spec.fixed)
     all_keys  = var_names(model)
     free_keys = Tuple(k for k in vars_of_type(model, :endogenous) if !(k in pin_keys))
 
@@ -85,24 +88,30 @@ function SSAssembler(model::SequenceModel)
         Λ_exog = kron(sparse(copy((dim.transition::Matrix{Float64})')), Λ_exog)
     end
 
-    return SSAssembler(model, all_keys, free_keys, length(free_keys),
+    return SSAssembler(model, ss_spec, all_keys, free_keys, length(free_keys),
                        Λ_exog, endog_dim, n_exog)
 end
 
 
 """
-    get_xVals(asm::SSAssembler, p_vec::AbstractVector) -> Vector
+    get_xVals(asm::SSAssembler, p_vec::AbstractVector) -> (xVals, ss_value)
 
 Returns the full length-`n_v` aggregate variable vector for iterate `p_vec`,
-without tiling to a padded matrix. Useful for extracting final SS values after
-convergence without constructing the full `n_v × T_pad` matrix.
+plus the converged steady-state marginal value matrix.
 
-AD-compatible: when `p_vec` carries ForwardDiff dual numbers, derivatives flow
-through the free and heterogeneous rows; pinned rows have zero partials.
+The heterogeneous variable rows are filled by running an inner VFI loop
+on `model.value_fn` until the `Value` field converges. The initial guess
+for the marginal value is the endogenous grid repeated across exogenous states
+(model-agnostic). The distribution D is computed from the converged policy.
+
+Returns a tuple `(xVals, ss_value)` where:
+- `xVals`: length-n_v vector (carries ForwardDiff partials when p_vec is Dual)
+- `ss_value`: converged marginal value matrix (same element type as xVals)
 """
 function get_xVals(asm::SSAssembler, p_vec::AbstractVector)
-    @unpack model, all_keys, free_keys, Λ_exog, endog_dim, n_exog = asm
+    @unpack model, ss_spec, all_keys, free_keys, Λ_exog, endog_dim, n_exog = asm
     n_v   = model.compspec.n_v
+    ε     = model.compspec.ε
     T_num = eltype(p_vec)
     xVals = zeros(T_num, n_v)
 
@@ -112,28 +121,36 @@ function get_xVals(asm::SSAssembler, p_vec::AbstractVector)
     end
 
     # Pinned variables — Float64 constant, zero partials
-    for (sym, val) in pairs(model.ss_initial.fixed)
+    for (sym, val) in pairs(ss_spec.fixed)
         xVals[findfirst(==(sym), all_keys)] = val
     end
 
-    # The distribution D is determined by the savings policy of the endogenous dimension.
-    # Compose the precomputed Λ_exog with the updated Λ_endog to get the full transition.
-    # TODO: when multiple endogenous dimensions are supported, compose one Λ_endog per
-    # endogenous dim into a joint transition before computing D.
-    policy_var_name = endog_dim.policy_var
-    policy = model.variables[policy_var_name].steadystate_fn(xVals, model)
-    Λ_endog = make_endogenous_transition(policy, endog_dim, n_exog)
-    D = invariant_dist((Λ_exog * Λ_endog)')
-
-    # Aggregate all heterogeneous variables against the shared distribution D.
-    # Reuse the already-computed policy for policy_var_name to avoid a redundant call.
-    for (varname, var) in pairs(model.variables)
-        var.var_type == :heterogeneous || continue
-        p = (varname === policy_var_name) ? policy : var.steadystate_fn(xVals, model)
-        xVals[findfirst(==(varname), all_keys)] = dot(vec(p), D)
+    # ── Inner VFI loop ────────────────────────────────────────────────────────
+    # Initial guess: ones matrix.  A constant marginal value makes `impliedstate`
+    # strictly increasing in a' on the first EGM call (since cmat is then constant
+    # and a' is the wealth grid), avoiding non-monotone-knot errors at startup.
+    value     = ones(eltype(xVals), endog_dim.n, n_exog)
+    result_nt = model.value_fn(value, xVals, model)
+    for _ in 1:10_000
+        value_new = result_nt.Value
+        tol_vfi   = maximum(abs.(ForwardDiff.value.(value_new) .-
+                                 ForwardDiff.value.(value)))
+        value     = value_new
+        tol_vfi < ε && break
+        result_nt = model.value_fn(value, xVals, model)
     end
 
-    return xVals
+    # ── Aggregate heterogeneous variables against the stationary distribution ─
+    het_keys        = vars_of_type(model, :heterogeneous)
+    policy_var_name = endog_dim.policy_var
+    Λ_endog         = make_endogenous_transition(result_nt[policy_var_name], endog_dim, n_exog)
+    D               = invariant_dist((Λ_exog * Λ_endog)')
+
+    for varname in het_keys
+        xVals[findfirst(==(varname), all_keys)] = dot(vec(result_nt[varname]), D)
+    end
+
+    return xVals, result_nt.Value
 end
 
 
@@ -148,75 +165,110 @@ function (asm::SSAssembler)(p_vec::AbstractVector)
     @unpack model = asm
     @unpack n_v, max_lag, max_lead = model.compspec
     T_pad = 1 + max_lag + max_lead
-    xVals = get_xVals(asm, p_vec)
+    xVals, _ = get_xVals(asm, p_vec)    # discard ss_value; only needed at final extraction
     return reshape(repeat(xVals, T_pad), n_v, T_pad)
 end
 
 
 """
-    get_SteadyState(model::SequenceModel) -> SteadyState
+    find_ss(model::SequenceModel, ss_spec, label::String) -> SteadyState
 
-Computes the steady state of the model using a modified Newton-Raphson iteration:
+Finds a single steady state of the model specified by `ss_spec` using a
+Newton-Raphson outer loop over the free endogenous variables. An inner VFI
+loop (inside `get_xVals`) iterates `model.value_fn` at each outer step until
+the marginal value converges.
 
-    p_{i+1} = p_i - J† z_i
-
-where `p` is the vector of free endogenous variables, `z = F(p)` are the
-equilibrium residuals at the steady-state padded matrix, and `J†` is computed
-via Julia's `\\` (least-squares / exact solution for square systems).
-Initial guesses come from `ss_initial.guesses` in the YAML, defaulting to 1.
+`label` is a human-readable string (e.g. `"initial"`, `"ending"`) used only
+in progress messages and warnings.
 """
-function get_SteadyState(model::SequenceModel)
-    asm  = SSAssembler(model)
+function find_ss(model::SequenceModel, ss_spec, label::String)
+    asm  = SSAssembler(model, ss_spec)
     F(p) = Residuals(asm(p), model)
-
-    p = Float64[get(model.ss_initial.guesses, k, 1.0) for k in asm.free_keys]
+    p    = Float64[get(ss_spec.guesses, k, 1.0) for k in asm.free_keys]
 
     ε        = model.compspec.ε
     z        = F(p)
     iter     = 0
     max_iter = 100
     while norm(z) > ε && iter < max_iter
-        J = ForwardDiff.jacobian(F, p)
-        p = p .- J \ z
-        z = F(p)
+        println("  [$label] Iteration $iter: residual norm = $(norm(z))")
+        J    = ForwardDiff.jacobian(F, p)
+        step = J \ z
+        η      = 1.0
+        z_norm = norm(z)
+        safe_eval(q) = try F(q) catch; fill(Inf, length(z)) end
+        p_new  = p .- η .* step
+        z_new  = safe_eval(p_new)
+        while !isfinite(norm(z_new)) || norm(z_new) > z_norm
+            η    /= 2
+            η > 1e-8 || break
+            p_new = p .- η .* step
+            z_new = safe_eval(p_new)
+        end
+        p = p_new
+        z = z_new
         iter += 1
     end
     iter == max_iter &&
-        @warn "get_SteadyState: did not converge in $max_iter iterations (residual norm: $(norm(z)))"
+        @warn "find_ss [$label]: did not converge in $max_iter iterations " *
+              "(residual norm: $(norm(z)))"
 
-    # Extract full SS values — get_xVals avoids the wasteful T_pad tiling
-    xVals_ss = Float64.(get_xVals(asm, p))
+    # Extract final SS values and the converged marginal value
+    xVals_raw, ss_value_raw = get_xVals(asm, p)
+    xVals_ss = Float64.(xVals_raw)
+    ss_value = Float64.(ss_value_raw)
     vars     = NamedTuple{asm.all_keys}(Tuple(xVals_ss))
 
-    # Policy matrices at the SS
-    het_keys      = vars_of_type(model, :heterogeneous)
-    policies_list = map(het_keys) do varname
-        model.variables[varname].steadystate_fn(xVals_ss, model)
-    end
-    policies = NamedTuple{het_keys}(Tuple(policies_list))
+    # One more value_fn call with Float64 inputs to get clean Float64 policies
+    het_keys  = vars_of_type(model, :heterogeneous)
+    result_ss = model.value_fn(ss_value, xVals_ss, model)
+    policies  = NamedTuple{het_keys}(Tuple(result_ss[k] for k in het_keys))
 
-    # Λss uses the endogenous dimension's policy_var (savings policy drives the distribution).
-    # TODO: when supporting multiple endogenous dimensions, compose multiple Λ_endog matrices
-    # into a joint steady-state transition before computing D.
     Λ_endog = make_endogenous_transition(
         policies[asm.endog_dim.policy_var], asm.endog_dim, asm.n_exog)
     Λss = asm.Λ_exog * Λ_endog
     D   = invariant_dist(Λss')
 
-    return SteadyState(vars, policies, Λss, D)
+    return SteadyState(vars, policies, Λss, D, ss_value)
+end
+
+
+"""
+    get_SteadyStates(model::SequenceModel) -> (SteadyState, SteadyState)
+
+Finds both the initial and ending steady states of the model by calling
+`find_ss` for each `SteadyStateSpec`. Returns a tuple `(ss_initial, ss_ending)`.
+
+If `model.ss_initial === model.ss_ending` (transitory shock), only one solve
+is performed and the same `SteadyState` object is returned for both.
+"""
+function get_SteadyStates(model::SequenceModel)
+    println("=== Finding initial steady state ===")
+    ss_initial = find_ss(model, model.ss_initial, "initial")
+
+    # If both specs are the same object, skip the second solve
+    if model.ss_initial === model.ss_ending
+        println("=== Initial = ending steady state (transitory shock) ===")
+        return ss_initial, ss_initial
+    end
+
+    println("=== Finding ending steady state ===")
+    ss_ending = find_ss(model, model.ss_ending, "ending")
+
+    return ss_initial, ss_ending
 end
 
 
 """
     test_SteadyState() -> (SequenceModel, SteadyState)
 
-Builds the KS model from YAML and runs `get_SteadyState`. Useful for
+Builds the KS model from YAML and runs `get_SteadyStates`. Useful for
 interactive testing of the steady-state solver.
 """
 function test_SteadyState()
     mod = build_model_from_yaml("KrusellSmith.yaml")
-    ss  = get_SteadyState(mod)
-    return mod, ss
+    ss_initial, ss_ending = get_SteadyStates(mod)
+    return mod, ss_initial, ss_ending
 end
 
 
