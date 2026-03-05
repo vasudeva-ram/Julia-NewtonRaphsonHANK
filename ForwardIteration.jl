@@ -79,6 +79,120 @@ end
 
 
 """
+    transition_step(policy_mat, D_prev, Λ_exog, endog_dim::HeterogeneityDimension,
+                    n_exog::Int) -> Vector
+
+One period of distribution evolution:
+
+    D_new = Λ_exog * (Λ_endog(policy_mat) * D_prev)
+
+where `Λ_endog` is the block-diagonal Young's (2010) transition matrix built from
+`policy_mat` via `make_endogenous_transition`. The two matrix-vector products are
+computed sequentially — never forming the n_m × n_m Kronecker product — so that
+the custom `rrule` below can compute the pullback without ever materialising a
+dense outer-product cotangent.
+"""
+function transition_step(policy_mat, D_prev, Λ_exog,
+                         endog_dim::HeterogeneityDimension, n_exog::Int)
+    Λ_endog = make_endogenous_transition(policy_mat, endog_dim, n_exog)
+    return Λ_exog * (Λ_endog * D_prev)
+end
+
+
+"""
+    ChainRulesCore.rrule(::typeof(transition_step), ...)
+
+Reverse-mode rule for `transition_step`. Avoids materialising any n_m × n_m
+dense matrix in either the forward or backward pass.
+
+## Forward pass
+
+Reproduces the primal computation and additionally records the interpolation
+bracket index `m` for each household state (ia, e) into `bucket` (n_a × n_exog
+integer matrix). `bucket` and `Λ_endog` are captured by the pullback closure.
+
+## Pullback
+
+Given cotangent `ΔD_new` (length-n_m vector), returns:
+
+1. `u = Λ_exog' * ΔD_new`  — one sparse MVM, O(nnz(Λ_exog))
+2. `ΔD_prev = Λ_endog' * u`  — one sparse MVM, O(nnz(Λ_endog)) ≈ O(2 n_m)
+3. `Δpolicy[ia,e]` via the chain rule through piecewise-linear interpolation:
+
+       Δpolicy[ia,e] = D_prev[col] · (u[row_hi] − u[row_lo]) / Δgrid
+
+   where `col = (e-1)·n_a + ia`, `row_hi/lo = (e-1)·n_a + m / m-1`, and
+   `Δgrid = grid[m] − grid[m-1]`. At clamped boundary states the gradient
+   is zero (constant extrapolation has zero derivative).
+
+No outer products or dense n_m × n_m matrices are ever formed. All operations
+are O(n_m). Memory overhead per time step: O(n_m) for `bucket` and `Λ_endog`.
+"""
+function ChainRulesCore.rrule(::typeof(transition_step),
+                               policy_mat, D_prev, Λ_exog,
+                               endog_dim::HeterogeneityDimension, n_exog::Int)
+    n_a  = endog_dim.n
+    grid = endog_dim.grid
+    n_m  = n_a * n_exog
+
+    # ── Forward: build Λ_endog, recording which bracket each policy falls in ──
+    bucket = Matrix{Int}(undef, n_a, n_exog)
+    Is = Int[];  Js = Int[];  Vs = Float64[]
+
+    for e in 1:n_exog
+        for ia in 1:n_a
+            col = (e - 1) * n_a + ia
+            p   = policy_mat[ia, e]
+            m   = searchsortedfirst(grid, p)
+            bucket[ia, e] = m
+
+            if m == 1
+                push!(Is, (e-1)*n_a + 1);    push!(Js, col); push!(Vs, 1.0)
+            elseif m > n_a
+                push!(Is, (e-1)*n_a + n_a);  push!(Js, col); push!(Vs, 1.0)
+            else
+                w = (p - grid[m-1]) / (grid[m] - grid[m-1])
+                push!(Is, (e-1)*n_a + m - 1); push!(Js, col); push!(Vs, 1.0 - w)
+                push!(Is, (e-1)*n_a + m);     push!(Js, col); push!(Vs, w)
+            end
+        end
+    end
+
+    Λ_endog = sparse(Is, Js, Vs, n_m, n_m)
+    D_new   = Λ_exog * (Λ_endog * D_prev)
+
+    function transition_pullback(ΔD_new)
+        # 1. u = Λ_exog' * ΔD_new  (sparse MVM)
+        u = Λ_exog' * ΔD_new
+
+        # 2. ΔD_prev = Λ_endog' * u  (sparse MVM; ≈ 2 n_m non-zeros in Λ_endog)
+        ΔD_prev = Λ_endog' * u
+
+        # 3. Δpolicy: chain rule through piecewise-linear interpolation.
+        #    Interior brackets only; clamped boundaries have zero derivative.
+        Δpolicy = zeros(n_a, n_exog)
+        for e in 1:n_exog
+            for ia in 1:n_a
+                m = bucket[ia, e]
+                if 1 < m <= n_a
+                    col   = (e - 1) * n_a + ia
+                    Δgrid = grid[m] - grid[m - 1]
+                    Δpolicy[ia, e] = D_prev[col] *
+                        (u[(e-1)*n_a + m] - u[(e-1)*n_a + m - 1]) / Δgrid
+                end
+            end
+        end
+
+        # Λ_exog is a Float64 constant (precomputed) → ZeroTangent.
+        # endog_dim and n_exog are structural, not differentiable → NoTangent.
+        return NoTangent(), Δpolicy, ΔD_prev, ZeroTangent(), NoTangent(), NoTangent()
+    end
+
+    return D_new, transition_pullback
+end
+
+
+"""
     ForwardIteration(policy_seqs::NamedTuple, model::SequenceModel,
                      ss_initial) -> NamedTuple
 
@@ -158,6 +272,11 @@ function ForwardIteration(policy_seqs::NamedTuple,
     # Build the time-invariant exogenous Kronecker factor (always Float64).
     # Π matrices from Rouwenhorst are row-stochastic; transpose → column-stochastic.
     # After the loop: Λ_exog = kron(Π_eK', kron(…, kron(Π_e1', I_{n_a})))
+    #
+    # TODO: Λ_exog is identical every call and depends only on model.heterogeneity.
+    # When the full Newton-Raphson solver is implemented, precompute Λ_exog once
+    # (analogous to SSAssembler.Λ_exog) and pass it in, rather than rebuilding it
+    # for each of the O(T²) ForwardIteration calls per Newton step.
     Λ_exog = spdiagm(0 => ones(Float64, n_endog_states))
     for (_, dim) in exog_dims
         Π_T    = copy((dim.transition::Matrix{Float64})')
@@ -176,12 +295,11 @@ function ForwardIteration(policy_seqs::NamedTuple,
     agg_data = [Vector{TF}(undef, T - 1) for _ in het_keys]
 
     for t in 1:T-1
-        # Endogenous Young's transition for period t
-        Λ_endog = make_endogenous_transition(policy_seqs[endog_dim.policy_var][t],
-                                             endog_dim, n_exog_states)
-
-        # Evolve distribution
-        D = Λ_exog * Λ_endog * D
+        # Evolve distribution: D_t = Λ_exog * Λ_endog(policy_t) * D_{t-1}
+        # Uses transition_step so that Zygote's pullback (via the custom rrule)
+        # never materialises a dense outer-product cotangent.
+        D = transition_step(policy_seqs[endog_dim.policy_var][t], D,
+                            Λ_exog, endog_dim, n_exog_states)
 
         # Aggregate each heterogeneous variable: E_D[policy_t]
         for (j, varname) in enumerate(het_keys)
@@ -190,6 +308,115 @@ function ForwardIteration(policy_seqs::NamedTuple,
     end
 
     return NamedTuple{het_keys}(Tuple(agg_data))
+end
+
+
+"""
+ChainRulesCore rrule for ForwardIteration.
+
+Zygote uses this rrule instead of tracing through the ForwardIteration body,
+which contains setindex! mutations. The forward pass mirrors ForwardIteration
+exactly, but also stores the per-step distribution states and the pullback
+closure from each transition_step call. The backward pass is a reverse-time
+loop that propagates the cotangent on `agg_seqs` back to `policy_seqs`.
+
+## Backward pass
+
+Given cotangent `Δagg::NamedTuple` on the output (one Float64 per het var per
+period), the reverse-time loop (t = T-1 downto 1) does:
+
+  1. Aggregation cotangent on D_t:
+       ΔD += Δagg[k][t] * vec(policy[k][t])   for each het var k
+
+  2. Direct gradient of policy[k][t] from dot-product aggregation:
+       Δpolicy[k][t] += Δagg[k][t] * reshape(D_t, policy_size)
+
+  3. Backprop through transition_step (using the stored pullback closure):
+       (_, Δpolicy_endog, ΔD_prev, ...) = ts_pullback[t](ΔD)
+       Δpolicy[endog_var][t] += Δpolicy_endog
+       ΔD = ΔD_prev   (propagate cotangent on D_{t-1})
+"""
+function ChainRulesCore.rrule(::typeof(ForwardIteration),
+                               policy_seqs::NamedTuple,
+                               model::SequenceModel,
+                               ss_initial)
+    @unpack T = model.compspec
+
+    endog_dims = [(name, dim) for (name, dim) in pairs(model.heterogeneity)
+                  if dim.dim_type == :endogenous]
+    exog_dims  = [(name, dim) for (name, dim) in pairs(model.heterogeneity)
+                  if dim.dim_type == :exogenous]
+    n_endog_states = prod(d.n for (_, d) in endog_dims)
+    n_exog_states  = prod(d.n for (_, d) in exog_dims)
+    length(endog_dims) == 1 ||
+        error("ForwardIteration rrule: exactly one endogenous dimension supported")
+    endog_dim = endog_dims[1][2]
+
+    Λ_exog = spdiagm(0 => ones(Float64, n_endog_states))
+    for (_, dim) in exog_dims
+        Π_T    = copy((dim.transition::Matrix{Float64})')
+        Λ_exog = kron(sparse(Π_T), Λ_exog)
+    end
+
+    het_keys  = vars_of_type(model, :heterogeneous)
+    endog_var = endog_dim.policy_var
+    endog_idx = findfirst(==(endog_var), het_keys)
+
+    # ── Forward pass: run the loop, storing distributions and pullback closures ─
+    D = Vector{Float64}(ss_initial.D)
+    n_m = length(D)
+    D_seq        = Vector{Vector{Float64}}(undef, T)   # D_seq[t] = D_{t-1}
+    ts_pullbacks = Vector{Function}(undef, T - 1)
+    agg_data     = [Vector{Float64}(undef, T - 1) for _ in het_keys]
+
+    for t in 1:T-1
+        D_seq[t] = copy(D)
+        D_new, pb = ChainRulesCore.rrule(transition_step,
+                                          policy_seqs[endog_var][t], D,
+                                          Λ_exog, endog_dim, n_exog_states)
+        D = Vector{Float64}(D_new)
+        ts_pullbacks[t] = pb
+        for (j, varname) in enumerate(het_keys)
+            agg_data[j][t] = dot(vec(policy_seqs[varname][t]), D)
+        end
+    end
+    D_seq[T] = copy(D)
+
+    result = NamedTuple{het_keys}(Tuple(agg_data))
+
+    function ForwardIteration_pullback(Δagg)
+        policy_size = size(policy_seqs[het_keys[1]][1])
+
+        ΔD = zeros(Float64, n_m)
+        Δpolicy_data = [[zeros(Float64, policy_size) for _ in 1:T-1]
+                        for _ in het_keys]
+
+        for t in T-1:-1:1
+            D_t = D_seq[t+1]   # D_t: distribution after transition step t
+
+            # Aggregation: agg[k][t] = dot(vec(policy[k][t]), D_t)
+            for (j, varname) in enumerate(het_keys)
+                ΔD               .+= Δagg[varname][t] .* vec(policy_seqs[varname][t])
+                Δpolicy_data[j][t] .+= Δagg[varname][t] .* reshape(D_t, policy_size)
+            end
+
+            # Backprop through transition_step using the stored pullback closure
+            grads = ts_pullbacks[t](ΔD)
+            # grads[1]=NoTangent, grads[2]=Δpolicy_mat, grads[3]=ΔD_prev
+            if endog_idx !== nothing
+                Δpolicy_data[endog_idx][t] .+= grads[2]
+            end
+            ΔD = Vector{Float64}(grads[3])
+        end
+
+        Δpolicy_seqs = NamedTuple{het_keys}(
+            Tuple(Δpolicy_data[j] for j in 1:length(het_keys))
+        )
+
+        return (NoTangent(), Δpolicy_seqs, NoTangent(), NoTangent())
+    end
+
+    return result, ForwardIteration_pullback
 end
 
 

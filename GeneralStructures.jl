@@ -14,7 +14,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 using LinearAlgebra, SparseArrays, DataFrames, UnPack, NLsolve, BenchmarkTools, Interpolations
-using Zygote, ForwardDiff, IncompleteLU, IterativeSolvers
+using Zygote, ForwardDiff, IncompleteLU, IterativeSolvers, ChainRulesCore
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -313,11 +313,15 @@ Within the transition columns, rows are filled from three sources:
 
 ## AD compatibility
 
-The SS boundary columns are assigned from `Float64` values (with zero
-ForwardDiff partials), so gradients flow only through `xVec_endog` and
-`agg_seqs` (which themselves depend on `xVec_endog`). This is the intended
-behaviour: the solver differentiates with respect to the endogenous sequence,
-not the fixed boundary conditions.
+The forward implementation uses standard `setindex!` mutation (fast, clear).
+A ChainRulesCore rrule is registered immediately below; Zygote uses the rrule
+instead of tracing through the function body, so no Zygote mutation errors
+arise. ForwardDiff JVPs (used in getDirectJacobian / JBI) run the forward body
+directly without Zygote involvement — these are also unaffected.
+
+SS boundary columns are assigned from `Float64` values (with zero derivatives),
+so gradients flow only through `xVec_endog` and `agg_seqs`. Gradients for
+`exog_paths`, `model`, `ss_start`, and `ss_end` are always zero / NoTangent.
 
 `ss_start` and `ss_end` are expected to have a `.vars::NamedTuple` field
 keyed by `var_names(model)` (satisfied by the `SteadyState` struct).
@@ -329,7 +333,7 @@ function assemble_full_xMat(xVec_endog::AbstractVector,
                              ss_start,
                              ss_end)
     @unpack T, n_v, n_endog, max_lag, max_lead = model.compspec
-    T_pad = (T - 1) + max_lag + max_lead   # total columns in padded matrix
+    T_pad = (T - 1) + max_lag + max_lead
 
     TF   = eltype(xVec_endog)
     xMat = zeros(TF, n_v, T_pad)
@@ -339,46 +343,87 @@ function assemble_full_xMat(xVec_endog::AbstractVector,
     het_keys   = vars_of_type(model, :heterogeneous)
     exog_keys  = vars_of_type(model, :exogenous)
 
-    # Precompute row indices for each variable group
     endog_rows = [findfirst(==(k), all_keys) for k in endog_keys]
     het_rows   = [findfirst(==(k), all_keys) for k in het_keys]
     exog_rows  = [findfirst(==(k), all_keys) for k in exog_keys]
 
-    # ── Initial SS boundary columns (1:max_lag) ───────────────────────────────
-    # Assigned as Float64 → implicit convert to TF with zero derivatives.
     for col in 1:max_lag
         for row in 1:n_v
             xMat[row, col] = ss_start.vars[all_keys[row]]
         end
     end
 
-    # ── Ending SS boundary columns (max_lag+T : T_pad) ────────────────────────
     for col in (max_lag + T):T_pad
         for row in 1:n_v
             xMat[row, col] = ss_end.vars[all_keys[row]]
         end
     end
 
-    # ── Transition columns (max_lag+1 : max_lag+T-1) ─────────────────────────
-    xMat_endog = reshape(xVec_endog, n_endog, T - 1)   # n_endog × (T-1)
-
+    xMat_endog = reshape(xVec_endog, n_endog, T - 1)
     for t in 1:T-1
         col = max_lag + t
-
         for (j, row) in enumerate(endog_rows)
             xMat[row, col] = xMat_endog[j, t]
         end
-
         for (j, key) in enumerate(het_keys)
             xMat[het_rows[j], col] = agg_seqs[key][t]
         end
-
         for (j, key) in enumerate(exog_keys)
             xMat[exog_rows[j], col] = exog_paths[key][t]
         end
     end
 
     return xMat
+end
+
+"""
+ChainRulesCore rrule for assemble_full_xMat.
+
+Zygote uses this rrule instead of tracing through the mutating function body.
+The pullback is a simple gather: it extracts the relevant rows from the
+cotangent matrix ΔxMat and distributes them to xVec_endog and agg_seqs.
+
+Gradient flow:
+- ΔxVec_endog: vec of endog rows × transition columns of ΔxMat
+               (column-major vec matches reshape(xVec_endog, n_endog, T-1))
+- Δagg_seqs:   het rows × transition columns, one length-(T-1) vector per variable
+- exog_paths, model, ss_start, ss_end: no gradient (constants w.r.t. a_flat)
+"""
+function ChainRulesCore.rrule(::typeof(assemble_full_xMat),
+                               xVec_endog::AbstractVector,
+                               agg_seqs::NamedTuple,
+                               exog_paths::NamedTuple,
+                               model::SequenceModel,
+                               ss_start,
+                               ss_end)
+    result = assemble_full_xMat(xVec_endog, agg_seqs, exog_paths,
+                                 model, ss_start, ss_end)
+
+    function assemble_full_xMat_pullback(ΔxMat)
+        @unpack T, n_endog, max_lag = model.compspec
+
+        all_keys   = var_names(model)
+        endog_keys = vars_of_type(model, :endogenous)
+        het_keys   = vars_of_type(model, :heterogeneous)
+
+        endog_rows = [findfirst(==(k), all_keys) for k in endog_keys]
+        het_rows   = [findfirst(==(k), all_keys) for k in het_keys]
+
+        trans_cols = max_lag+1 : max_lag+T-1
+
+        # vec() in column-major order matches reshape(xVec_endog, n_endog, T-1)
+        ΔxVec_endog = vec(Matrix(ΔxMat[endog_rows, trans_cols]))
+
+        Δagg_seqs = NamedTuple{het_keys}(
+            ntuple(i -> Vector(ΔxMat[het_rows[i], trans_cols]),
+                   length(het_keys))
+        )
+
+        return (NoTangent(), ΔxVec_endog, Δagg_seqs,
+                ZeroTangent(), NoTangent(), NoTangent(), NoTangent())
+    end
+
+    return result, assemble_full_xMat_pullback
 end
 
 

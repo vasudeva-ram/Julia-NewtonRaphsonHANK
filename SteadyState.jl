@@ -258,20 +258,6 @@ function get_SteadyStates(model::SequenceModel)
     return ss_initial, ss_ending
 end
 
-
-"""
-    test_SteadyState() -> (SequenceModel, SteadyState)
-
-Builds the KS model from YAML and runs `get_SteadyStates`. Useful for
-interactive testing of the steady-state solver.
-"""
-function test_SteadyState()
-    mod = build_model_from_yaml("KrusellSmith.yaml")
-    ss_initial, ss_ending = get_SteadyStates(mod)
-    return mod, ss_initial, ss_ending
-end
-
-
 """
     SingleRun(ss_initial::SteadyState, ss_ending::SteadyState,
               model::SequenceModel) -> Vector
